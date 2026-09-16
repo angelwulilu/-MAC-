@@ -337,6 +337,36 @@ git add -A && git commit -m "补 workflow" && git push origin main
 A：点进失败的那次运行 → 看哪个步骤红了 → 展开日志。
 最省事的是把 **「打包日志」Artifact** 下载下来发我。
 
+**Q：日志看不了 / 只有一句「Process completed with exit code 1」？**
+A：GitHub 的作业日志要登录才能下载（匿名 API 会返回 403）。
+如果 Artifact 里也没有「打包日志」，说明**失败发生在打包步骤之前**
+（日志文件是打包时才生成的）。这种情况看**步骤名**就能定位：
+展开失败的那一步，一般会打印出 xx 项 PASS / 几条 FAIL，
+把 **FAIL 那几行**截图发我就够了。
+
+**Q：第 5 步「字体解析 + 交付物格式检查」秒挂（exit 1）？**
+A：这一坑踩过一次，记下来：自检脚本里有一批断言查的是
+**仓库外**的 Windows 侧文件（`配置git.bat` / `_setup_git.py` /
+`推送mac到github.bat` / `_push_mac.py` / `_package_mac_src.py`）。
+这些文件在 `D:\video-tool\` 下 —— 但 GitHub 仓库的根**就是 `mac/`**，
+所以 runner 上一个都找不到 → 断言失败 → 整个脚本 `exit 1`。
+**本地永远测不出来**（本地这些文件都在），所以在 Mac 上遇到
+「本地全过、CI 秒挂」时，先怀疑这一类。
+
+现在已经修好并且上了双保险：
+- 这类断言统一走 `check_win_side()`：**找不到就「跳过」，不判失败**
+- `_verify_runner_layout.py` 会**把 `mac/` 拷到临时目录假装成仓库根**，
+  在那份「runner 同款布局」里把三个自检脚本再跑一遍 —— 专门抓这种 bug
+- `_verify_mac_format.py` 的 `[6]` 组是**元检查**：用 AST 扫源码，
+  发现「没受保护的上游目录引用」直接报错
+
+想在本机自查有没有这类问题（Windows 上也能跑）：
+```bash
+cd mac
+python _dev_tests/_verify_runner_layout.py
+```
+输出 `通过 3 个脚本，失败 0 个` 就说明 CI 那关能过。
+
 **Q：报 403 / 权限错误？**
 A：仓库 Settings → Actions → General → Workflow permissions →
 选 **Read and write permissions** → Save。
@@ -370,6 +400,10 @@ A：把 `runs-on: macos-latest` 改成 `runs-on: macos-13`，再手动跑一次�
 | `.github/workflows/mac-package.yml` | `mac/` | **打包 workflow**（本文主角）：真机打包 → 自检 → 烧字幕 → 传 Artifact |
 | `.github/workflows/mac-smoke-test.yml` | `mac/` | 轻量冒烟测试（原本就有，我把「push 自动跑」关掉了改成手动） |
 | `.gitignore` | `mac/` | 挡住 `__pycache__` / `build` / `dist` / `_bundled_ffmpeg` |
+| `_dev_tests/_verify_mac_fonts.py` | `mac/` | 字体跨平台解析自检（41 项） |
+| `_dev_tests/_verify_mac_format.py` | `mac/` | 交付物格式 + workflow + 仓库布局自检（171 项） |
+| `_dev_tests/_verify_mac_platform.py` | `mac/` | 平台分支逻辑自检（56 项） |
+| **`_dev_tests/_verify_runner_layout.py`** | `mac/` | **精简布局复跑**：把 `mac/` 拷到临时目录当仓库根，复现 runner 布局再跑一遍三个自检 —— 专抓「只在本地能过」的断言 |
 | `README-在免费Mac上测试.md` | `mac/` | 本文 |
 | **`配置git.bat`** | **`video-tool/`** | **双击即配好 git（第 2 步用）** |
 | **`_setup_git.py`** | **`video-tool/`** | 上面那个 bat 的实际逻辑 |
