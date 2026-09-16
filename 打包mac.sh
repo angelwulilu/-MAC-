@@ -114,24 +114,58 @@ FP="$HERE/_bundled_ffmpeg/ffprobe"
 ALT_DIR="$HERE/_bundled_ffmpeg/_alt"
 
 # 下载单个二进制。$1=类型(ffmpeg|ffprobe) $2=架构(arm|intel) $3=落盘路径
+#
+# ⚠️ 为什么要**多个源**：原来只用 osxexperts.net 一家，实测那个站很不稳 ——
+#    从国内直接访问是 HTTP 000（连接都建不起来）。它是第三方小站，
+#    挂了/限速/被墙都不奇怪。而这一步失败会让整个打包 die。
+#    所以改成**逐个源重试**，任一成功即可。
 dl_one() {
-    local kind="$1" a="$2" out="$3" url
+    local kind="$1" a="$2" out="$3"
+    local urls=()
+
     if [ "$a" = "arm" ]; then
-        [ "$kind" = "ffmpeg" ] && url="https://www.osxexperts.net/ffmpeg9arm.zip" \
-                               || url="https://www.osxexperts.net/ffprobe9arm.zip"
+        # 主源：osxexperts（体积小、是静态编译的 arm64 版）
+        if [ "$kind" = "ffmpeg" ]; then
+            urls+=("https://www.osxexperts.net/ffmpeg9arm.zip")
+        else
+            urls+=("https://www.osxexperts.net/ffprobe9arm.zip")
+        fi
     else
-        [ "$kind" = "ffmpeg" ] && url="https://www.osxexperts.net/ffmpeg80intel.zip" \
-                               || url="https://www.osxexperts.net/ffprobe80intel.zip"
-    fi
-    local tmp; tmp="$(mktemp -d)"
-    say "    下载 $kind ($a) ..."
-    if curl -fL --progress-bar "$url" -o "$tmp/x.zip"; then
-        (cd "$tmp" && unzip -q x.zip)
-        if [ -f "$tmp/$kind" ]; then
-            cp "$tmp/$kind" "$out"; rm -rf "$tmp"; return 0
+        if [ "$kind" = "ffmpeg" ]; then
+            urls+=("https://www.osxexperts.net/ffmpeg80intel.zip")
+        else
+            urls+=("https://www.osxexperts.net/ffprobe80intel.zip")
         fi
     fi
-    rm -rf "$tmp"
+
+    # 备选源：evermeet.cx（持续维护多年的 macOS 静态构建站，GitHub 上广泛使用）
+    if [ "$a" = "arm" ]; then
+        # evermeet 目前主要是 x86_64 + arm64 universal 构建
+        urls+=("https://evermeet.cx/ffmpeg/getrelease/${kind}/zip")
+    else
+        urls+=("https://evermeet.cx/ffmpeg/getrelease/${kind}/zip")
+    fi
+
+    local u
+    for u in "${urls[@]}"; do
+        local tmp; tmp="$(mktemp -d)"
+        say "    下载 $kind ($a) ← $u"
+        # --retry 容忍瞬时抖动；-fL 跟随跳转并在 HTTP 错误时失败
+        if curl -fL --retry 2 --retry-delay 2 --connect-timeout 20 \
+                --max-time 180 -s -o "$tmp/x.zip" "$u"; then
+            (cd "$tmp" && unzip -q x.zip) 2>/dev/null
+            # 有的源包出来就叫 ffmpeg / ffprobe，有的是二进制裸文件
+            if [ -f "$tmp/$kind" ]; then
+                cp "$tmp/$kind" "$out"; rm -rf "$tmp"; return 0
+            fi
+            # 兼容 evermeet 那种直接给裸二进制的
+            if [ -f "$tmp/x.zip" ] && file "$tmp/x.zip" 2>/dev/null | grep -qi 'executable\|Mach-O'; then
+                cp "$tmp/x.zip" "$out"; rm -rf "$tmp"; return 0
+            fi
+        fi
+        rm -rf "$tmp"
+        warn "    这个源不行，换下一个"
+    done
     return 1
 }
 
@@ -157,9 +191,9 @@ if [ -x "$FF" ] && [ -x "$FP" ]; then
 elif use_local; then
     :
 else
-    warn "本机没有 ffmpeg，从 osxexperts.net 下载当前架构（$THIS_ARCH）版本"
-    dl_one ffmpeg  "$THIS_ARCH" "$FF" || die "ffmpeg 下载失败。请手动安装后重跑：brew install ffmpeg"
-    dl_one ffprobe "$THIS_ARCH" "$FP" || die "ffprobe 下载失败。请手动安装后重跑：brew install ffmpeg"
+    warn "本机没有 ffmpeg，从网络下载当前架构（$THIS_ARCH）版本（多个源逐个试）"
+    dl_one ffmpeg  "$THIS_ARCH" "$FF" || die "ffmpeg 下载失败（所有源都不通）。最稳的办法是先装一个再重跑：brew install ffmpeg"
+    dl_one ffprobe "$THIS_ARCH" "$FP" || die "ffprobe 下载失败（所有源都不通）。最稳的办法是先装一个再重跑：brew install ffmpeg"
 fi
 
 chmod +x "$FF" "$FP"

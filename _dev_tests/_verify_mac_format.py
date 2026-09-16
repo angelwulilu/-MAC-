@@ -68,6 +68,16 @@ check("无过期的 7.1 下载地址", "ffmpeg71arm.zip" not in text)
 check("图标按两个位置找（$HERE 与 $HERE/..）",
       '"$HERE/app_icon.ico"' in text and '"$HERE/../app_icon.ico"' in text)
 check("找不到图标只是 warn（不中断打包）", "找不到 app_icon.ico" in text)
+
+# 🔴 ffmpeg 下载必须**多个源**。原来只用 osxexperts.net 一家，实测那站从国内
+#    访问是 HTTP 000（连接都建不起来）。它是第三方小站，挂了很正常，
+#    而这一步失败会让整个打包 die。所以改成逐个源重试。
+check("ffmpeg 下载有备选源（不只 osxexperts）", "evermeet.cx" in text)
+check("下载失败会换下一个源（不是直接放弃）", "换下一个" in text)
+check("下载带 --retry 容忍瞬时抖动", "--retry" in text)
+check("下载带 --max-time（别无限挂住）", "--max-time" in text)
+check("下载失败提示里给了 brew 兜底方案",
+      "brew install ffmpeg" in text)
 print()
 
 # ------------------------------------------------- 一键打包.command（双击版）
@@ -180,6 +190,26 @@ if os.path.isfile(pk_wf):
     check("用 macos-latest runner", "macos-latest" in wtext)
     # 🔴 必须设超时，否则卡住会一直烧额度
     check("设了 timeout-minutes", "timeout-minutes" in wtext)
+    # 🔴🔴 CI 里必须**先装 ffmpeg** 再打包 —— 这是第一次运行失败的根因：
+    #    打包mac.sh 的 [3/6] 要找一份 macOS ffmpeg 打进 .app，顺序是
+    #    「本地已有 → use_local(command -v ffmpeg) → 从 osxexperts.net 下载」。
+    #    runner 没预装 ffmpeg → 前两条落空 → 走第三方小站下载 → 那个站实测
+    #    从国内访问 HTTP 000 根本连不上 → 下载失败 → die → 整个打包挂掉。
+    #    brew install 之后 use_local 立刻命中，绕开那个不靠谱的源。
+    _ff_idx = -1
+    _build_idx = -1
+    for _i, _ln in enumerate(wtext.splitlines()):
+        if "装 ffmpeg" in _ln and "name:" in _ln:
+            _ff_idx = _i
+        if "打包mac.sh --one" in _ln:
+            _build_idx = _i
+    check("workflow 里装了 ffmpeg（打包前必做）",
+          "brew install ffmpeg" in wtext)
+    check("装 ffmpeg 的步骤在打包之前",
+          _ff_idx >= 0 and _build_idx >= 0 and _ff_idx < _build_idx,
+          "ffmpeg@%d build@%d" % (_ff_idx, _build_idx))
+    check("装 ffmpeg 那步解释了为什么必需",
+          "use_local" in wtext or "osxexperts" in wtext)
     # 🔴 调的是仓库里那份脚本（不是抄一份逻辑进 workflow）——
     #    这样「CI 跑的」和「本地跑的」才是同一份，不会互相掩盖问题
     check("调用 打包mac.sh（而非抄一份逻辑）", "bash 打包mac.sh" in wtext)
