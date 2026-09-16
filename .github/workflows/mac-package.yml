@@ -102,14 +102,71 @@ jobs:
         if: ${{ inputs.run_tests }}
         run: |
           cd "$CODE"
-          echo "───── 字体跨平台检查 ─────"
-          python3 _dev_tests/_verify_mac_fonts.py
-          echo "───── 交付物格式检查 ─────"
-          python3 _dev_tests/_verify_mac_format.py
-          echo "───── 平台适配检查 ─────"
-          python3 _dev_tests/_verify_mac_platform.py
-          echo "───── 精简布局复跑（模拟 runner 目录，防『只在本地能过』）─────"
-          python3 _dev_tests/_verify_runner_layout.py
+
+          # 🔴 先把「环境事实」打出来。上一次这个步骤连挂两轮都只有一句
+          #    "Process completed with exit code 1"，什么线索都没有，
+          #    而 GitHub 的 job 日志要登录才能下载（匿名 API 返回 403）。
+          #    环境信息 + 每个脚本的完整输出 + 逐条 FAIL 都落到文件里，
+          #    再由下面 always() 的上传步骤带走 —— 以后挂了一眼能看出原因。
+          OUT=/tmp/selftest_out
+          mkdir -p "$OUT"
+          {
+            echo "===== 环境事实 ====="
+            echo "date        : $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            echo "uname -a    : $(uname -a)"
+            echo "uname -m    : $(uname -m)"
+            echo "CODE        : $CODE"
+            echo "pwd         : $(pwd)"
+            echo "GITHUB_WORKSPACE: $GITHUB_WORKSPACE"
+            echo "which python3: $(command -v python3)"
+            echo "which python : $(command -v python || echo '(无)')"
+            python3 -VV
+            python3 -c "import sys,os;print('sys.platform =',sys.platform);print('os.name =',os.name)"
+            echo
+            echo "===== 目录布局（CODE 顶层）====="
+            ls -la "$CODE" | head -40
+            echo
+            echo "===== CODE 的父目录（看是不是仓库根）====="
+            ls -la "$(dirname "$CODE")" | head -20
+          } 2>&1 | tee "$OUT/00-环境.txt"
+
+          # 每个脚本单独跑，**失败也继续** —— 这样一次就能看到全部失败项，
+          # 不用「修一个再跑一次」把额度烧掉。
+          #
+          # 🔴 别写成 `if python3 xxx.py | tee log; then` —— 管道的退出码是 **tee 的**（恒 0），
+          #    if 永远为真，脚本挂了也会报「通过」。要么 `set -o pipefail`，要么像下面
+          #    这样拆两步、用 PIPESTATUS 取真正的退出码。（第一版就踩了这个坑。）
+          rc_all=0
+          for s in _verify_mac_fonts _verify_mac_format \
+                   _verify_mac_platform _verify_runner_layout; do
+            echo ""
+            echo "════════════════════════════════════════════════"
+            echo "  跑 $s.py"
+            echo "════════════════════════════════════════════════"
+            python3 "_dev_tests/$s.py" 2>&1 | tee "$OUT/$s.txt"
+            rc=${PIPESTATUS[0]}          # 0 = python3 的退出码（不是 tee 的）
+            if [ "$rc" = "0" ]; then
+              echo "→ $s.py  exit=0  ✅"
+            else
+              echo "→ $s.py  exit=$rc  ❌"
+              rc_all=1
+            fi
+          done
+
+          # 把所有 FAIL 行汇总到一份文件，方便一眼看
+          echo "===== 全部 FAIL 行 =====" > "$OUT/99-失败汇总.txt"
+          grep -h "FAIL" "$OUT"/*.txt >> "$OUT/99-失败汇总.txt" 2>/dev/null || echo "(没有任何 FAIL 行)" >> "$OUT/99-失败汇总.txt"
+          cat "$OUT/99-失败汇总.txt"
+
+          echo ""
+          echo "════════════════════════════════════════════════"
+          if [ "$rc_all" = "0" ]; then
+            echo "✅ 四个自检脚本全部通过"
+          else
+            echo "❌ 有脚本失败 —— 详细输出已写入 /tmp/selftest_out/，"
+            echo "   会在本次运行的 Artifacts 里以「自检详细日志」上传。"
+          fi
+          exit $rc_all
 
       # ── 2. 装依赖 ────────────────────────────────────────────────────
       - name: 装 PyInstaller 与 PySide6
@@ -280,6 +337,19 @@ jobs:
           if-no-files-found: warn
           retention-days: 7
 
+      - name: 上传自检详细日志（第 5 步挂掉时的唯一线索）
+        # ⚠️ 这一步专门为「第 5 步失败」准备：那次失败时 /tmp/build.log 之类的
+        #    根本还没生成（打包没跑到），而 GitHub 的 job 日志又要登录才能下载。
+        #    /tmp/selftest_out/ 是第 5 步写的环境信息 + 每个脚本完整输出 + FAIL 汇总，
+        #    用 always() 保证失败也上传。
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: 自检详细日志
+          path: /tmp/selftest_out/
+          if-no-files-found: warn
+          retention-days: 7
+
       - name: 上传打包日志（出错时用来看原因）
         if: always()
         uses: actions/upload-artifact@v4
@@ -288,5 +358,6 @@ jobs:
           path: |
             /tmp/build.log
             /tmp/selftest.log
+            /tmp/selftest_out/
           if-no-files-found: warn
           retention-days: 7
