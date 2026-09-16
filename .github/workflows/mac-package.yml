@@ -54,10 +54,20 @@ concurrency:
 jobs:
   package:
     runs-on: macos-latest          # arm64；想试 Intel 版改成 macos-13
-    timeout-minutes: 45            # 卡住时别白烧额度
+    # 兜底上限。本仓库是 public，macOS 的分钟数是**免费不限量**的，
+    # 所以放宽没有成本；正常一轮约 15~25 分钟，45 太紧，一卡就整轮报废。
+    # ⚠️ 被这条超时掐掉时，GitHub 显示的是 `cancelled`（不是 failure），
+    #    很容易误判成「有人点了取消」而白重跑一轮 —— 看被掐那步的耗时就能分辨。
+    timeout-minutes: 90
 
     env:
       QT_QPA_PLATFORM: offscreen   # CI 没显示器，禁止 Qt 弹窗
+      # 🔴 自检**不许弹模态框**：QMessageBox 会等人点「确定」，CI 上没人点 → 永久卡死。
+      #    offscreen 只解决「显示」，**不解决「阻塞」**。
+      #    （2026-09-16 两次 run 各烧 45 分钟后被超时取消，根因就是它）
+      VIDEOTOOL_SELFTEST_NOGUI: "1"
+      # 🔴 让 print 立刻进日志：万一哪一步卡住，也能从日志看到已经跑到哪
+      PYTHONUNBUFFERED: "1"
       HOMEBREW_NO_AUTO_UPDATE: "1"
       HOMEBREW_NO_INSTALL_CLEANUP: "1"
 

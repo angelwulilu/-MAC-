@@ -314,17 +314,55 @@ echo
 # ------------------------------------------------------------- 6. 自检
 say "[6/6] 自检（确认程序能起来）..."
 EXE="$APP/Contents/MacOS/视频工具"
-if "$EXE" --selftest > /tmp/vt_selftest.log 2>&1; then
-    if grep -q "全部正常" /tmp/vt_selftest.log; then
-        ok "自检通过：全部正常"
-        grep -E "ffmpeg|预设|结论|OK" /tmp/vt_selftest.log | head -20 || true
-    else
-        warn "自检跑完了但结论不是「全部正常」，输出如下："
-        tail -30 /tmp/vt_selftest.log
-    fi
+
+# 🔴 自检**绝不能弹窗**。
+#    app.py 自检结束时会弹一个模态 QMessageBox 等人点「确定」；CI / 无人值守
+#    环境没人可点 → 永久卡死 → 撞 CI 的 timeout-minutes，整轮被判 cancelled。
+#    2026-09-16 两次 CI 都挂在这里，各烧满 45 分钟（.app 其实早就打好了）。
+#    注意：QT_QPA_PLATFORM=offscreen 只解决「显示」，**不解除模态阻塞**。
+#    非交互环境一律跳过弹窗；交互式终端里保留，方便本机看报告。
+if [ -t 0 ] && [ -t 1 ]; then
+    say "  （交互式终端：自检结束会弹报告窗，点「确定」即可）"
 else
-    warn "自检返回非 0，输出如下（把这段发给开发看）："
-    tail -40 /tmp/vt_selftest.log
+    export VIDEOTOOL_SELFTEST_NOGUI=1
+fi
+
+# 第二道保险（看门狗）：就算将来又冒出别的阻塞点，也绝不让整轮 CI 陪着干等。
+# 用纯 bash 后台 + kill 实现；不依赖 GNU 的 `timeout`（macOS 没预装）。
+SELFTEST_TIMEOUT=300
+"$EXE" --selftest > /tmp/vt_selftest.log 2>&1 &
+_SELFTEST_PID=$!
+(
+    sleep "$SELFTEST_TIMEOUT"
+    if kill -0 "$_SELFTEST_PID" 2>/dev/null; then
+        echo "[看门狗] 自检超过 ${SELFTEST_TIMEOUT}s 仍未结束，强制终止（pid $_SELFTEST_PID）" >&2
+        kill -TERM "$_SELFTEST_PID" 2>/dev/null
+        sleep 5
+        kill -KILL "$_SELFTEST_PID" 2>/dev/null
+    fi
+) &
+_WATCHDOG_PID=$!
+
+set +e
+wait "$_SELFTEST_PID"
+SELFTEST_RC=$?
+set -e
+kill "$_WATCHDOG_PID" 2>/dev/null || true
+wait "$_WATCHDOG_PID" 2>/dev/null || true
+
+echo "自检退出码：$SELFTEST_RC"
+echo "───── 自检输出（全文，方便在 CI 日志里直接看）─────"
+cat /tmp/vt_selftest.log 2>/dev/null || true
+echo "──────────────────────────────────────────────"
+
+if [ "$SELFTEST_RC" = "0" ] && grep -q "全部正常" /tmp/vt_selftest.log; then
+    ok "自检通过：全部正常"
+    grep -E "ffmpeg|预设|结论|OK" /tmp/vt_selftest.log | head -20 || true
+elif [ "$SELFTEST_RC" = "143" ] || [ "$SELFTEST_RC" = "137" ]; then
+    warn "自检被看门狗超时终止（${SELFTEST_TIMEOUT}s）—— .app 已经打好了，别慌"
+else
+    warn "自检返回非 0（$SELFTEST_RC），输出如下（把这段发给开发看）："
+    tail -40 /tmp/vt_selftest.log 2>/dev/null || true
 fi
 echo
 

@@ -1497,6 +1497,36 @@ class ConcatTab(QWidget):
             btn.setEnabled(not busy)
 
 
+def _selftest_skip_gui():
+    """自检结束时的「自检完成」弹窗，要不要跳过。
+
+    🔴 为什么必须有这个判断：`QMessageBox.information()` 是**模态**的 ——
+       它会开自己的事件循环，**一直等人点「确定」**。CI / 无人值守环境里
+       没有任何人可点，进程就永久卡死。特别注意：`QT_QPA_PLATFORM=offscreen`
+       只是「渲染到一块假屏幕」，**并不解除模态阻塞**，指望它没用。
+
+       2026-09-16 的实证：CI 两次都卡在这里，各烧满 45 分钟被超时取消，
+       .app 其实早打好了却传不上去 —— 因为后面的上传步骤根本没机会跑。
+
+    跳过它对结论毫无影响：报告本来就 print 到 stdout、也写进《自检报告.txt》，
+    打包脚本判成败靠 grep 日志 —— 弹窗纯粹是给「本机手动跑」的人看的。
+
+    返回 True = 跳过弹窗。
+    """
+    if os.environ.get("VIDEOTOOL_SELFTEST_NOGUI"):
+        return True
+    # Qt 明确要求离屏/最小平台插件 → 屏幕前一定没有真人
+    if os.environ.get("QT_QPA_PLATFORM", "").strip().lower() in ("offscreen", "minimal"):
+        return True
+    # 输入输出都没接终端（CI 的典型情形）→ 一定是自动化流程
+    try:
+        if not (sys.stdin.isatty() and sys.stdout.isatty()):
+            return True
+    except Exception:
+        return True
+    return False
+
+
 def _selftest():
     """诊断模式：命令行加 `--selftest` 时，检查关键路径和依赖，写出报告。
 
@@ -1630,10 +1660,13 @@ def _selftest():
         out_path = "(写入失败)"
     try:
         print(report)
+        # 🔴 立刻刷出去：万一后面卡住或被杀，日志里也一定能看到报告
+        sys.stdout.flush()
     except Exception:
         pass
-    # 需要看弹窗就正常跑；自动化测试可设 VIDEOTOOL_SELFTEST_NOGUI=1 跳过弹窗
-    if os.environ.get("VIDEOTOOL_SELFTEST_NOGUI"):
+    # 需要看弹窗就正常跑；自动化测试可设 VIDEOTOOL_SELFTEST_NOGUI=1 跳过弹窗。
+    # 🔴 但更要紧的是「非交互环境**自动**跳过」—— 见 _selftest_skip_gui() 的说明。
+    if _selftest_skip_gui():
         return
     try:
         from PySide6.QtWidgets import QApplication, QMessageBox

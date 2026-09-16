@@ -784,6 +784,55 @@ for _wf_name in ("mac-package.yml", "mac-smoke-test.yml"):
           "_verify_runner_layout.py" in _wtxt)
 print()
 
+# ---------------------------------------------------------------- CI 不能卡死
+print("[8] CI 不能卡死（模态弹窗 / 缺超时兜底）")
+# 🔴 2026-09-16 的教训：app.py 的 --selftest 结束时弹**模态** QMessageBox 等人点「确定」，
+#    CI 上没人点 → 永久阻塞 → 撞 timeout-minutes 被判 cancelled，两次各烧 45 分钟。
+#    ⚠️ QT_QPA_PLATFORM=offscreen 只解决「显示」，**不解决「阻塞」**。
+#    下面这几条就是把这个坑钉住，别拆。
+_sh_path = os.path.join(HERE, "打包mac.sh")
+_sh_txt = open(_sh_path, encoding="utf-8").read() if os.path.isfile(_sh_path) else ""
+_app_path = os.path.join(HERE, "app.py")
+_app_txt = open(_app_path, encoding="utf-8").read() if os.path.isfile(_app_path) else ""
+_pkg_path = os.path.join(_wf_dir, "mac-package.yml")
+_pkg_txt = open(_pkg_path, encoding="utf-8").read() if os.path.isfile(_pkg_path) else ""
+
+# ① 打包脚本调 --selftest 时必须屏蔽弹窗
+check("打包mac.sh 调 --selftest 时设了 VIDEOTOOL_SELFTEST_NOGUI（否则 CI 必卡死）",
+      "--selftest" in _sh_txt and "VIDEOTOOL_SELFTEST_NOGUI=1" in _sh_txt)
+
+# ② 必须有超时兜底，不能无限等
+check("打包mac.sh 的自检有超时看门狗（不会无限期干等）",
+      "SELFTEST_TIMEOUT" in _sh_txt and "kill -TERM" in _sh_txt)
+
+# ③ app.py 自己也要能判「非交互」，不能只靠外部传环境变量
+check("app.py 自检会自己判断非交互环境（不只依赖外部环境变量）",
+      "_selftest_skip_gui" in _app_txt and "isatty" in _app_txt
+      and "offscreen" in _app_txt)
+
+# ④ workflow 把两道保险都设上
+check("mac-package.yml 设了 VIDEOTOOL_SELFTEST_NOGUI",
+      "VIDEOTOOL_SELFTEST_NOGUI" in _pkg_txt)
+check("mac-package.yml 设了 PYTHONUNBUFFERED（卡住时也看得到跑到哪）",
+      "PYTHONUNBUFFERED" in _pkg_txt)
+
+# ⑤ timeout 不能过紧（45 分钟实测不够，一卡就整轮报废）
+_tmo = 0
+for _ln in _pkg_txt.splitlines():
+    _ls = _ln.strip()
+    if _ls.startswith("timeout-minutes:"):
+        try:
+            _tmo = max(_tmo, int(_ls.split(":", 1)[1].strip().split()[0]))
+        except ValueError:
+            pass
+check("mac-package.yml 的 timeout-minutes >= 60（实测 45 太紧）",
+      _tmo >= 60, "实际 %d" % _tmo)
+
+# ⑥ 自检输出必须能进 CI 日志（卡住时才知道跑到哪）
+check("打包mac.sh 会把自检输出 cat 出来（不是只写文件）",
+      "cat /tmp/vt_selftest.log" in _sh_txt)
+print()
+
 print("=" * 62)
 if skips:
     print("通过 %d 项，失败 %d 项，跳过 %d 项" % (len(oks), len(fails), len(skips)))
