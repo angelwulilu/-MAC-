@@ -329,19 +329,30 @@ Artifact 区在运行页面的**最底部**，往下滚到底就能看到。
 
 ### 5.1 第 5 步自检的「期望输出」对照表（判断日志正不正常用这个）
 
-第 5 步会依次跑 4 个脚本。**在 macOS runner（`sys.platform == "darwin"`）上**，
-正常应该是这样 —— 以后看到不同的数字，就是有问题：
+第 5 步会依次跑 4 个脚本。**在 macOS runner 上**正常是这样
+（下表是 **2026-09-16 run #5 实测值**，不是估算）：
 
-| 脚本 | 通过 | 失败 | 跳过 | 说明 |
-|---|---|---|---|---|
-| `_verify_mac_fonts.py` | 41 | 0 | 0 | 字体探测，与平台无关 |
-| `_verify_mac_format.py` | 198 | 0 | 0 | 交付物格式（含 LF/BOM 体检），与平台无关 |
-| `_verify_mac_platform.py` | **51** | 0 | **5** | 跳过的 5 条是 **Windows 专属**断言 |
-| `_verify_runner_layout.py` | 224 | 0 | 15 | 里面又跑了一遍上面三个 |
+| 脚本 | 通过 | 失败 | 跳过 |
+|---|---|---|---|
+| `_verify_mac_fonts.py` | **41** | **0** | 0 |
+| `_verify_mac_format.py` | **132** | **0** | **5** |
+| `_verify_mac_platform.py` | **51** | **0** | **5** |
+| `_verify_runner_layout.py` | **224** | **0** | **15** |
 
-**为什么 platform 脚本会「跳过 5 条」—— 这不是问题，这是设计。**
+> ⚠️ **注意：这些数字与本机（Windows）跑出来的不一样，这是正常的。**
+> 本机 format 是 198、platform 是 56 —— 因为本机有上游 `D:\video-tool\` 的
+> Windows 侧文件（`配置git.bat`、`_push_mac.py` 等），而**仓库里只有 `mac/`**。
+> 那些文件相关的断言在 CI 上会整体跳过，所以通过数变少。
+> **别拿本机的数字去对 CI 的日志，要看下面这张表。**
 
-那 5 条断言的是「`paths.py` 在 **Windows 上**的行为不变」：
+**一句话判据（最重要，记这一条就够）：**
+
+> 第 5 步正常时，四个脚本**全部 `exit=0`**，`FAIL` 行应为 **0 条**。
+> **只要出现 `FAIL`，就是真问题；`SKIP` 是正常的，不用管。**
+
+**为什么会有 `SKIP` —— 两类，都是设计好的，不是异常。**
+
+**① 平台类跳过（platform 脚本里那 5 条）** —— 断的是「`paths.py` 在 **Windows 上**的行为」：
 
 ```
 priority_supported() 在 Windows 返回 True
@@ -352,21 +363,27 @@ set_priority('low') 生效（BELOW_NORMAL 0x4000）
 ```
 
 `creationflags` / `CREATE_NO_WINDOW` 是 **Windows 独有的子进程参数**，
-macOS 上 `spawn_kwargs()` 本来就该返回 `{}`。所以在 Mac 上这 5 条**无法成立也不该成立**，
-脚本会用 `check_windows()` 把它们标成 `SKIP` 而不是 `FAIL`。
+macOS 上 `spawn_kwargs()` 本来就该返回 `{}`。所以这 5 条在 Mac 上
+**无法成立也不该成立** → 脚本用 `check_windows()` 标成 `SKIP` 而不是 `FAIL`。
 
 > 🔴 这正是当初 CI 连挂两次的根因：这些断言原来用的是裸 `check()`，
 > 在 Windows 上全过、一到 macOS runner 就 5 条全红。
 > 现在它们走 `check_windows()` —— **在 Mac 上跳过，在 Windows 上照跑**。
 
-另外 10 条跳过（在 `_verify_runner_layout.py` 里看到）是**布局维度**的：
-复跑时只把 `mac/` 拷进临时目录，上游 `D:\video-tool\` 的 Windows 侧文件（`配置git.bat` 等）
-不在仓库里，所以「那些文件存在」这类断言也会跳过。同理，是**该跳的**。
+**② 布局类跳过（format 的 5 条 + runner_layout 的 15 条）** ——
+断的是「上游 `D:\video-tool\` 的那些 Windows 侧文件存在」，而**仓库里只有 `mac/`**：
 
-**一句话判据：**
+```
+文件存在                      配置git.bat 存在（Windows 双击入口）
+_setup_git.py 存在（实际逻辑）    推送mac到github.bat 存在（Windows 双击入口）
+_push_mac.py 存在（实际逻辑）
+```
 
-> 第 5 步正常时，四个脚本**全部 `exit=0`**，`FAIL` 行应为 **0 条**。
-> 只要出现 `FAIL`，就是真问题；`SKIP` 是正常的，不用管。
+`_verify_runner_layout.py` 自己的输出里也写了这句话，看到就放心：
+
+```
+（共跳过 15 条：那是 Windows 侧检查，runner 上本就不适用）
+```
 
 ---
 
@@ -392,6 +409,36 @@ git ls-tree -r --name-only origin/main | grep workflows
 git add -A && git commit -m "补 workflow" && git push origin main
 ```
 推完回 Actions 页面按 F5 刷新。
+
+**Q：看到红色的 ✗ 就说失败了吗？怎么区分「真失败」和「被取消」？**
+A：**一定要先看是 `failure` 还是 `cancelled`** —— 两者现象完全不同，处理方式也不同。
+
+| 显示 | 含义 | 怎么办 |
+|---|---|---|
+| **`cancelled`**（灰/黑 ✗） | **被人为打断**，不是代码问题 | 直接**重新跑一次**即可 |
+| `failure`（红 ✗） | **真失败**，有根因 | 下载「自检详细日志」发我 |
+
+**怎么分辨**：点进那次运行，看每个步骤的标记 ——
+
+- `cancelled` 时：**失败步骤之前的所有步骤都是绿勾**，
+  而**失败那一步后面的步骤全是 `skipped`（灰）**。
+  最典型的是「打包」那一步显示 `cancelled`，后面「确认产物 / 上传 .app 成品」全灰。
+- `failure` 时：会有明确的红叉步骤，后面的步骤通常也会继续跑或明确失败。
+
+> 🔴 **2026-09-16 实例**：run #5 就是这样 —— 第 4 步（字体+格式检查）
+> 和装依赖、装 ffmpeg **全绿**，只有「打包」那步 `cancelled`，
+> 后面 6 步含「上传 .app 成品」全部 `skipped` → 所以 Artifacts 里**没有 `.app`**，
+> 只有「自检详细日志」和「打包日志」两个。
+>
+> 那次的自检结果是**完全正常的**（`99-失败汇总.txt` 只有 56 字节 = 0 条 FAIL），
+> 之所以日志停在打包脚本的 `[6/6] 自检` 那一行，就是因为**跑在最后一步时被掐断了**。
+>
+> **被判为「取消」的三个常见原因**：
+> ① 在页面上手动按了 **Cancel**；
+> ② 点了 **Re-run**，而旧的那次还在跑 —— GitHub 会自动把旧的取消掉；
+> ③ **超时**（本仓库是免费额度，单 job 上限 6 小时，正常打包 6~10 分钟，基本不会撞到）。
+>
+> **看到 `cancelled` 不要改代码**，直接再跑一次就行。
 
 **Q：跑失败了怎么办？**
 A：点进失败的那次运行 → 页面**最底部 Artifacts** → 下载 **「自检详细日志」**。
