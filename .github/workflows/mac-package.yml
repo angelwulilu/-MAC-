@@ -1,9 +1,15 @@
-name: Mac 打包（免费真机跑 PyInstaller，产出 .app）
+name: Mac 打包（产出 .app 成品 ← 要这个）
 
 # ───────────────────────────────────────────────────────────────────────
 # 为什么要有这个：PyInstaller 不能交叉编译 —— Windows 上打不出 macOS 包。
 #   这个 workflow 用 GitHub **免费的 macOS runner**（真实的 Mac 机器）
 #   替你跑一次打包，把 .app 当 Artifact 传回来。
+#
+# ⚠️ 和另一个 workflow 的区别（别点错）：
+#   · 本文件（Mac 打包）→ **产出 .app 成品**，约 6~10 分钟，就是你要的
+#   · mac-smoke-test.yml（Mac 冒烟测试）→ 只验字幕/字体，**不打包**，约 3~5 分钟
+#   点 Run workflow 后**应该弹出表单**（有 run_tests / make_dmg 两个勾选项）。
+#   如果没有表单 → 你点错 workflow 了，回到左侧列表换成本文件。
 #
 # 💰 额度（务必知道，超了会扣钱或排队）：
 #   · 公开仓库（public） → macOS 分钟**完全免费、不限量**

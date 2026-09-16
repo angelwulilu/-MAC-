@@ -1,4 +1,4 @@
-name: Mac 真机冒烟测试（字幕烧录 + 字体探测）
+name: Mac 冒烟测试（字幕+字体，不管打包）
 
 # ───────────────────────────────────────────────────────────────────────
 # 这是「免费真 macOS」环境：GitHub 的 macos-latest runner 是真实的 Mac 机器。
@@ -8,9 +8,14 @@ name: Mac 真机冒烟测试（字幕烧录 + 字体探测）
 #      （ffmpeg 字幕烧录 / 字体探测 / 模块可 import）是纯命令行，在
 #      QT_QPA_PLATFORM=offscreen 下能真机验证。GUI 交互需借真 Mac 看。
 #
+# ⚠️ 和另一个 workflow 的区别（别点错）：
+#   · 本文件（Mac 冒烟测试）  → 只验字幕/字体，**不打包 .app**，约 3~5 分钟
+#   · mac-package.yml（Mac 打包）→ **产出 .app 成品**，约 6~10 分钟
+#   要 .app 就点「Mac 打包（…产出 .app）」那个，不是这个。
+#
 # 用法（把 mac/ 单独作为 Git 仓库最简单）：
 #   1) cd D:\video-tool\mac && git init && git add -A && git commit && git remote add origin <你的仓库> && git push
-#   2) GitHub 仓库页 → Actions → 左侧「Mac 真机冒烟测试」→ Run workflow
+#   2) GitHub 仓库页 → Actions → 左侧选本 workflow → Run workflow
 #   3) 跑完在 Artifacts 里下载 mac-burned-sample.mp4，肉眼看中文字形对不对
 #
 # 仓库布局兼容：无论把 mac/ 当仓库根，还是把整个 video-tool 当仓库根
@@ -19,6 +24,13 @@ name: Mac 真机冒烟测试（字幕烧录 + 字体探测）
 
 on:
   workflow_dispatch:            # 手动触发
+    # 这里也放一个输入项：① 给用户一个「有表单」的确认信号，
+    # ② 顺便能跳过耗时的字幕烧录步骤。
+    inputs:
+      burn_sample:
+        description: '真机烧一条中文字幕样例（出 mp4 供肉眼看）'
+        type: boolean
+        default: true
   # 🔴 原来是 push 就自动跑 —— 那会**每推一次代码就烧一次 macOS 额度**。
   #    macOS runner 在私有仓库按 10 倍折算（免费 2000 分钟 ≈ 200 个 macOS 分钟），
   #    随手推几次就没了。改成只手动触发，想测再点。
@@ -87,6 +99,7 @@ jobs:
           PY
 
       - name: 真实烧录一条中文字幕（drawtext 路，验证 Mac 字体 + freetype 真出中文字形）
+        if: ${{ inputs.burn_sample }}
         run: |
           cd "$CODE"
           ffmpeg -y -f lavfi -i testsrc=duration=2:size=1080x1920:rate=30 -pix_fmt yuv420p /tmp/test_src.mp4
@@ -103,6 +116,7 @@ jobs:
           PY
 
       - name: 额外验证 .ass 预设烧录（libass 路，best-effort 不阻塞）
+        if: ${{ inputs.burn_sample }}
         run: |
           cd "$CODE"
           python3 - <<'PY'
@@ -120,8 +134,9 @@ jobs:
           PY
 
       - name: 上传成品供肉眼检查
-        if: always()
+        if: ${{ always() && inputs.burn_sample }}
         uses: actions/upload-artifact@v4
         with:
           name: mac-burned-sample
           path: /tmp/test_burned.mp4
+          if-no-files-found: warn
