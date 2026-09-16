@@ -327,6 +327,47 @@ Artifact 区在运行页面的**最底部**，往下滚到底就能看到。
 > 也就是说：CI 能帮你把「**能不能跑起来 / 能不能干活**」这类问题挡掉，
 > 但「**界面好不好用**」还是得等真 Mac。
 
+### 5.1 第 5 步自检的「期望输出」对照表（判断日志正不正常用这个）
+
+第 5 步会依次跑 4 个脚本。**在 macOS runner（`sys.platform == "darwin"`）上**，
+正常应该是这样 —— 以后看到不同的数字，就是有问题：
+
+| 脚本 | 通过 | 失败 | 跳过 | 说明 |
+|---|---|---|---|---|
+| `_verify_mac_fonts.py` | 41 | 0 | 0 | 字体探测，与平台无关 |
+| `_verify_mac_format.py` | 198 | 0 | 0 | 交付物格式（含 LF/BOM 体检），与平台无关 |
+| `_verify_mac_platform.py` | **51** | 0 | **5** | 跳过的 5 条是 **Windows 专属**断言 |
+| `_verify_runner_layout.py` | 224 | 0 | 15 | 里面又跑了一遍上面三个 |
+
+**为什么 platform 脚本会「跳过 5 条」—— 这不是问题，这是设计。**
+
+那 5 条断言的是「`paths.py` 在 **Windows 上**的行为不变」：
+
+```
+priority_supported() 在 Windows 返回 True
+spawn_kwargs() 仍返回 creationflags
+spawn_kwargs() 含 CREATE_NO_WINDOW
+set_priority('high') 生效（HIGH 0x80）
+set_priority('low') 生效（BELOW_NORMAL 0x4000）
+```
+
+`creationflags` / `CREATE_NO_WINDOW` 是 **Windows 独有的子进程参数**，
+macOS 上 `spawn_kwargs()` 本来就该返回 `{}`。所以在 Mac 上这 5 条**无法成立也不该成立**，
+脚本会用 `check_windows()` 把它们标成 `SKIP` 而不是 `FAIL`。
+
+> 🔴 这正是当初 CI 连挂两次的根因：这些断言原来用的是裸 `check()`，
+> 在 Windows 上全过、一到 macOS runner 就 5 条全红。
+> 现在它们走 `check_windows()` —— **在 Mac 上跳过，在 Windows 上照跑**。
+
+另外 10 条跳过（在 `_verify_runner_layout.py` 里看到）是**布局维度**的：
+复跑时只把 `mac/` 拷进临时目录，上游 `D:\video-tool\` 的 Windows 侧文件（`配置git.bat` 等）
+不在仓库里，所以「那些文件存在」这类断言也会跳过。同理，是**该跳的**。
+
+**一句话判据：**
+
+> 第 5 步正常时，四个脚本**全部 `exit=0`**，`FAIL` 行应为 **0 条**。
+> 只要出现 `FAIL`，就是真问题；`SKIP` 是正常的，不用管。
+
 ---
 
 ## 六、常见问题
