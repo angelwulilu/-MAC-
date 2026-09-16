@@ -191,6 +191,33 @@ if os.path.isfile(_guide):
     g = open(_guide, encoding="utf-8").read()
     check("说明书含「芯片架构不匹配」的排查", "架构" in g and "osxexperts" in g)
     check("说明书含「不用重新打包」的换法", "不用重新打包" in g)
+
+# 🔴 所有 .py / .sh / .command 必须纯 LF 无 BOM。
+#    .py 虽然在 Mac 上带 CRLF 也能跑，但：
+#      ① 和仓库里其他文件不一致（git diff 会出现整文件重写）；
+#      ② .sh/.command 带 CRLF 会直接 `bad interpreter: /bin/bash^M` 跑不起来。
+#    这类问题在 Windows 上用 Edit 工具改文件时**很容易悄悄引入**（踩过一次：
+#    _verify_mac_format.py 被写成 771 个 CRLF），所以纳入自检。
+for _fn in sorted(os.listdir(HERE)):
+    if not _fn.lower().endswith((".py", ".sh", ".command")):
+        continue
+    _p = os.path.join(HERE, _fn)
+    if not os.path.isfile(_p):
+        continue
+    _r = open(_p, "rb").read()
+    check("%s 纯 LF 无 BOM" % _fn,
+          b"\r\n" not in _r and not _r.startswith(b"\xef\xbb\xbf"),
+          "CRLF x%d%s" % (_r.count(b"\r\n"),
+                          "，有 BOM" if _r.startswith(b"\xef\xbb\xbf") else ""))
+for _fn in ("_verify_mac_fonts.py", "_verify_mac_format.py",
+            "_verify_mac_platform.py", "_verify_runner_layout.py"):
+    _p = os.path.join(HERE, "_dev_tests", _fn)
+    if not os.path.isfile(_p):
+        continue
+    _r = open(_p, "rb").read()
+    check("_dev_tests/%s 纯 LF 无 BOM" % _fn,
+          b"\r\n" not in _r and not _r.startswith(b"\xef\xbb\xbf"),
+          "CRLF x%d" % _r.count(b"\r\n"))
 print()
 
 # ---------------------------------------------------------------- spec 文件
@@ -511,13 +538,37 @@ print()
 
 # ---------------------------------------------------------------- 不该有的
 print("[5] 不该被打包进去的东西")
-bad_present = []
-for junk in ("build", "dist", "__pycache__", ".venv", "_bundled_ffmpeg"):
-    if os.path.exists(os.path.join(HERE, junk)):
-        bad_present.append(junk)
-# _bundled_ffmpeg 是脚本自己生成的，允许存在；其余是构建缓存
-real_junk = [j for j in bad_present if j != "_bundled_ffmpeg"]
-check("没有 build/dist/__pycache__ 等缓存", not real_junk, str(real_junk))
+# 🔴 口径修正（bug 复盘 run 35061816016）：
+#    原来写的是「mac/ 目录下不许存在 build/dist/__pycache__」——**这是错的口径**。
+#    ① `__pycache__` 是 Python 跑任何一个 .py 就会生成的**运行时产物**，
+#       CI 里我们刚跑过 `python3 _dev_tests/*.py` → 必然存在 → 断言必挂；
+#    ② 这些东西本来就由 `.gitignore` 挡住，**根本不会进仓库**，
+#       所以真正要验的是「.gitignore 排掉了」，而不是「文件系统里没有」。
+#    本地之所以一直过，只是因为跑测试前恰好没生成（或已清）—— 又一个「只在本地能过」。
+_gitignore = ""
+_gi_path = os.path.join(HERE, ".gitignore")
+if os.path.isfile(_gi_path):
+    _gitignore = open(_gi_path, encoding="utf-8").read()
+
+for _junk, _why in [("build", "构建产物"), ("dist", "构建产物"),
+                    ("__pycache__", "Python 字节码"),
+                    (".venv", "虚拟环境"),
+                    ("_bundled_ffmpeg", "打包脚本自己生成的 ffmpeg")]:
+    check(".gitignore 排除了 %s（%s）" % (_junk, _why),
+          _junk in _gitignore)
+
+# 真正的「不该出现」= 会被提交进仓库、又不该在的东西。
+# __pycache__ 只提示、不判失败（运行时必然产生）。
+_suspicious = []
+for _junk in ("build", "dist", ".venv"):
+    if os.path.exists(os.path.join(HERE, _junk)):
+        _suspicious.append(_junk)
+check("工作区没有 build/dist/.venv（真被打包会出问题）",
+      not _suspicious, str(_suspicious))
+
+_has_pycache = os.path.exists(os.path.join(HERE, "__pycache__"))
+print("  ℹ️  __pycache__ %s（.gitignore 已排除，不影响仓库；本地跑过测试就会生成）"
+      % ("存在" if _has_pycache else "不存在"))
 # 确认没有把 Windows 的 .exe 混进来
 exes = []
 for dp, dns, fns in os.walk(HERE):
@@ -667,6 +718,70 @@ for _fn in _meta_files:
         _has_decl = ("HAS_WIN_SIDE" in _txt) or ("check_win_side" in _txt)
         check("%s 碰了上游目录并声明了跳过逻辑" % _fn, _has_decl,
               "用了 UPSTREAM 拼接但没有 HAS_WIN_SIDE/check_win_side")
+print()
+
+# ------------------------------------------------- 元检查：平台维度也不能「只在本地能过」
+#
+# 🔴 第二次踩坑（run 35061816016）：修完「布局」问题后第 5 步仍然挂。
+#    真凶换成了「平台」——
+#      · _verify_mac_platform.py [1] 有 5 条裸 check 断言「paths.py 在 Windows 行为不变」，
+#        在 macOS runner 上必然全 FAIL → exit 1。
+#      · 而 _verify_runner_layout.py 当时**只模拟了目录布局、没模拟 sys.platform**，
+#        本机（Windows）跑照样全过 → 又一次「只在本地能过」。
+#
+#    现在上两条保险：
+#      ① 平台脚本里凡是断言「Windows 行为」的，必须走 check_windows（非 Windows 跳过）；
+#      ② 复跑脚本必须伪装 sys.platform（见下一条 check）。
+print("[7] 平台维度安全性（别再有「只在 Windows 成立」的裸断言）")
+
+# ① 在 _verify_mac_platform.py 里找「**运行时**断言 Windows 行为、却用裸 check 包着」的
+#
+#    ⚠️ 判据要排除「静态源码检查」—— 那类断言虽然文本里有 Windows 字样，
+#    但验的是「源码里还有没有这个字符串/这个分支」，**平台无关**，
+#    在 macOS 上也该正常跑（如「Windows 行为不变」是喂假 sys.executable 的纯函数测试、
+#    「_find_tool 仍含 D:\ffmpeg\bin」是查文本、「ntdll 只出现在 Windows 分支」是查 AST/文本）。
+#    真正危险的是**调用 paths.*() 的运行时断言** —— 那类必须走 check_windows。
+_plat = os.path.join(_self_dir, "_verify_mac_platform.py")
+_plat_bad = []
+if os.path.isfile(_plat):
+    _plat_src = open(_plat, encoding="utf-8").read()
+    _pt = _ast_meta.parse(_plat_src)
+    # 「运行时」的判据：断言调用里出现了对 paths 模块的属性调用
+    # （paths.priority_supported() / paths.spawn_kwargs() / paths.set_priority()）
+    for _n in _ast_meta.walk(_pt):
+        if not isinstance(_n, _ast_meta.Call):
+            continue
+        if not (isinstance(_n.func, _ast_meta.Name) and _n.func.id == "check"):
+            continue
+        _runtime = False
+        for _sub in _ast_meta.walk(_n):
+            if isinstance(_sub, _ast_meta.Call) \
+                    and isinstance(_sub.func, _ast_meta.Attribute) \
+                    and isinstance(_sub.func.value, _ast_meta.Name) \
+                    and _sub.func.value.id == "paths":
+                _runtime = True
+        if _runtime:
+            _nm = ""
+            if _n.args and isinstance(_n.args[0], _ast_meta.Constant):
+                _nm = str(_n.args[0].value)
+            _plat_bad.append((_n.lineno, _nm[:44]))
+check("平台脚本里「运行时」的 paths 断言都走了 check_windows（裸的 %d 条）"
+      % len(_plat_bad), not _plat_bad, str(_plat_bad[:4]))
+
+# ② 复跑脚本必须真的伪装平台（否则又只能抓一半）
+_rl = os.path.join(_self_dir, "_verify_runner_layout.py")
+_rl_txt = open(_rl, encoding="utf-8").read() if os.path.isfile(_rl) else ""
+check("复跑脚本伪装了 sys.platform（否则只能抓「布局」抓不到「平台」）",
+      'sys.platform = fake_platform' in _rl_txt and 'fake_platform="darwin"' in _rl_txt)
+
+# ③ 两个 workflow 都必须跑这个复跑脚本
+#    ⚠️ HERE 就是 mac/（= 仓库根），.github 在它**里面**，不是外面。
+_wf_dir = os.path.join(HERE, ".github", "workflows")
+for _wf_name in ("mac-package.yml", "mac-smoke-test.yml"):
+    _wf_path = os.path.join(_wf_dir, _wf_name)
+    _wtxt = open(_wf_path, encoding="utf-8").read() if os.path.isfile(_wf_path) else ""
+    check("%s 跑了平台+布局复跑" % _wf_name,
+          "_verify_runner_layout.py" in _wtxt)
 print()
 
 print("=" * 62)

@@ -7,14 +7,19 @@
    「逻辑分支没写错」，不能替代真机验证。
 
 覆盖：
-  1. paths.priority_supported() 在 Windows 上为 True
-  2. spawn_kwargs() Windows 下带 creationflags（回归，别被改坏）
+  1. paths.priority_supported() 在 Windows 上为 True   ← **仅 Windows，非 Windows 跳过**
+  2. spawn_kwargs() Windows 下带 creationflags（回归，别被改坏）  ← **仅 Windows，非 Windows 跳过**
   3. app_dir() / bundle_dir() 的 .app 路径解析（用假 sys.executable）
   4. _find_tool() 的候选列表包含 macOS 的 Homebrew 路径
   5. procctl.py 在非 Windows 下**不再 raise**，且 suspend/resume 走 os.kill
   6. utils.open_in_explorer 有 macOS 分支
   7. app.py / subtitle_tab.py 里所有 priority 相关 UI 都有平台判断
   8. 没有任何地方在非 Windows 分支调用 os.startfile
+
+🔴 **第 1、2 组是「Windows 专属」断言**（走 check_windows）：
+   它们验证的是「改了 mac/ 之后 Windows 行为没被带坏」，只有在本机是 Windows 时才成立。
+   在 GitHub 的 macOS runner 上这 5 条会**跳过**而不是失败 ——
+   否则 CI 第 5 步必挂（bug 复盘见 run 35061816016）。
 """
 import ast
 import os
@@ -24,8 +29,15 @@ import sys
 HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))   # mac/ 根目录
 sys.path.insert(0, HERE)
 
+# 🔴 这个脚本的设计前提是「在 Windows 上跑」（见文件头说明）。
+#    [1] 组断言的是 **Windows 侧行为不变**，只有真的在 Windows 上才有意义。
+#    CI 跑在 macOS runner 上，这 5 条必然全挂 —— 不是代码坏了，是断言打错地方了。
+#    （bug 复盘：run 35061816016 第 5 步失败，10 条 FAIL 里有 5 条出自这里）
+IS_WINDOWS = sys.platform == "win32"
+
 fails = []
 oks = []
+skips = []
 
 
 def check(name, cond, extra=""):
@@ -37,6 +49,16 @@ def check(name, cond, extra=""):
         print("  FAIL %s  %s" % (name, extra))
 
 
+def check_windows(name, cond, extra=""):
+    """只对「在 Windows 上成立」的断言。非 Windows 下**跳过**，不算失败。"""
+    if not IS_WINDOWS:
+        skips.append(name)
+        print("  SKIP %s  （当前非 Windows，%s 侧行为不在本机验证范围）"
+              % (name, "macOS" if sys.platform == "darwin" else sys.platform))
+        return
+    check(name, cond, extra)
+
+
 print("=" * 64)
 print("Mac 版平台分支验证（在 Windows 上做静态/逻辑检查）")
 print("=" * 64)
@@ -44,22 +66,24 @@ print()
 
 # ---------------------------------------------------------------- 1 & 2
 print("[1] paths.py 在本机（Windows）行为不变")
+if not IS_WINDOWS:
+    print("    （当前是 %s —— 这组断的是 Windows 侧行为，整体跳过）" % sys.platform)
 import paths
 
-check("priority_supported() 在 Windows 返回 True",
-      paths.priority_supported() is True)
+check_windows("priority_supported() 在 Windows 返回 True",
+              paths.priority_supported() is True)
 kw = paths.spawn_kwargs()
-check("spawn_kwargs() 仍返回 creationflags",
-      "creationflags" in kw, repr(kw))
-check("spawn_kwargs() 含 CREATE_NO_WINDOW",
-      bool(kw.get("creationflags", 0) & 0x08000000),
-      hex(kw.get("creationflags", 0)))
+check_windows("spawn_kwargs() 仍返回 creationflags",
+              "creationflags" in kw, repr(kw))
+check_windows("spawn_kwargs() 含 CREATE_NO_WINDOW",
+              bool(kw.get("creationflags", 0) & 0x08000000),
+              hex(kw.get("creationflags", 0)))
 paths.set_priority("high")
-check("set_priority('high') 生效（HIGH 0x80）",
-      bool(paths.spawn_kwargs().get("creationflags", 0) & 0x80))
+check_windows("set_priority('high') 生效（HIGH 0x80）",
+              bool(paths.spawn_kwargs().get("creationflags", 0) & 0x80))
 paths.set_priority("low")
-check("set_priority('low') 生效（BELOW_NORMAL 0x4000）",
-      bool(paths.spawn_kwargs().get("creationflags", 0) & 0x4000))
+check_windows("set_priority('low') 生效（BELOW_NORMAL 0x4000）",
+              bool(paths.spawn_kwargs().get("creationflags", 0) & 0x4000))
 paths.set_priority("normal")
 print()
 
@@ -257,11 +281,18 @@ if os.path.isfile(sh):
 print()
 
 print("=" * 64)
-print("通过 %d 项，失败 %d 项" % (len(oks), len(fails)))
+if skips:
+    print("通过 %d 项，失败 %d 项，跳过 %d 项" % (len(oks), len(fails), len(skips)))
+else:
+    print("通过 %d 项，失败 %d 项" % (len(oks), len(fails)))
 if fails:
     print()
     for f in fails:
         print("  FAIL:", f)
+if skips:
+    print()
+    for s in skips:
+        print("  SKIP:", s)
 print("=== %s ===" % ("全部通过" if not fails else "存在失败"))
 print("=" * 64)
 sys.exit(0 if not fails else 1)

@@ -87,17 +87,30 @@ jobs:
 
       # ── 1. 先跑不依赖 PySide6 的保底检查（快，坏了立刻知道）─────────────
       #
-      # 🔴 这一组曾经把 CI 卡死过：run 35060031916 在这里 **1 秒就 exit 1**，
-      #    但本地（Windows）262 项全过。原因是自检脚本里有一批断言查的是
-      #    **仓库外**的 Windows 侧文件（配置git.bat / _setup_git.py /
-      #    推送mac到github.bat / _push_mac.py / _package_mac_src.py）——
-      #    这些文件在 D:\video-tool\ 下，而仓库的根就是 mac/，runner 上没有。
-      #    修法：这类断言统一走 check_win_side()，精简布局下「跳过」而不是「失败」。
-      #    并且加了 [6] 元检查 + _verify_runner_layout.py 双重防回归。
+      # 🔴 这一组把 CI 卡死过**两次**，两次都是「本地全过、runner 秒挂」：
       #
-      # ⚠️ 最后那个 _verify_runner_layout.py 是**自检的自检**：
-      #    它把 mac/ 拷到临时目录当仓库根，在那份「runner 同款布局」里再跑一遍
-      #    上面三个脚本。它能抓出「只在本地能过」的断言 —— 也就是这类 bug 的未来版本。
+      # 第一次 run 35060031916 —— **布局维度**
+      #    自检脚本里有一批断言查的是**仓库外**的 Windows 侧文件
+      #    （配置git.bat / _setup_git.py / 推送mac到github.bat / _push_mac.py /
+      #    _package_mac_src.py）—— 它们在 D:\video-tool\ 下，而仓库的根就是 mac/，
+      #    runner 上一个都没有 → 5 条 FAIL → exit 1。
+      #    修法：这类断言统一走 check_win_side()，精简布局下「跳过」而不是「失败」。
+      #
+      # 第二次 run 35061816016 —— **平台维度**（修完布局后还是挂）
+      #    ① _verify_mac_platform.py [1] 的 5 条断言写的是「paths.py 在 **Windows**
+      #       行为不变」，在 macOS runner 上必然全 FAIL。
+      #       修法：改走新增的 check_windows()，非 Windows 下跳过。
+      #    ② _verify_mac_format.py [5] 断言「mac/ 下不存在 __pycache__」——
+      #       而 CI 刚跑过 python3 _dev_tests/*.py，Python 必然生成它 → 必挂。
+      #       本地过只是因为跑之前恰好没生成。这是**口径写错**：
+      #       该验的是「.gitignore 排掉了它」，不是「磁盘上没有」。
+      #
+      # 防回归（三重）：
+      #    · [6] 元检查 —— AST 扫源码，抓「查仓库外文件却没走 check_win_side」
+      #    · [7] 元检查 —— AST 扫源码，抓「运行时断言 Windows 行为却是裸 check」
+      #    · _verify_runner_layout.py —— **自检的自检**：把 mac/ 拷到临时目录当仓库根，
+      #      **并把 sys.platform 伪装成 darwin**，同时复现「布局 + 平台」两个维度。
+      #      ⚠️ 只模拟布局是不够的 —— 第二次就是因为漏了平台维度才又漏掉一遍。
       - name: 字体解析 + 交付物格式检查
         if: ${{ inputs.run_tests }}
         run: |
