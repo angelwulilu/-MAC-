@@ -1,0 +1,245 @@
+name: Mac 打包（免费真机跑 PyInstaller，产出 .app）
+
+# ───────────────────────────────────────────────────────────────────────
+# 为什么要有这个：PyInstaller 不能交叉编译 —— Windows 上打不出 macOS 包。
+#   这个 workflow 用 GitHub **免费的 macOS runner**（真实的 Mac 机器）
+#   替你跑一次打包，把 .app 当 Artifact 传回来。
+#
+# 💰 额度（务必知道，超了会扣钱或排队）：
+#   · 公开仓库（public） → macOS 分钟**完全免费、不限量**
+#   · 私有仓库（private）→ 免费额度 2000 分钟/月，但 **macOS 按 10 倍折算**
+#                          ≈ 只能跑 200 个 macOS 分钟
+#   本 workflow 一次约 6~10 分钟 → 私有仓库大约能跑 20~30 次。
+#   ⚠️ 所以别在 push 时自动触发（下面只留手动触发），改完代码想测再点一次。
+#   ⚠️ 想无限免费又不在意代码公开 → 仓库设成 public。
+#
+# 🖥 runner 是 arm64（M 系列）→ 打出来的 .app **只能在 Apple 芯片的 Mac 上跑**。
+#    需要 Intel 版 .app 的话，得用 macos-13（Intel runner，排队久、额度一样算）。
+#
+# ❗ CI 验不了算什么（别对它期待过高）：
+#    runner **没有显示器**，任何 Qt 图形界面都点不了。所以下面这些**验不了**：
+#      · 界面排版好不好看、按钮点起来顺不顺手
+#      · 字幕预览拖动定位对不对、高分屏字糊不糊
+#      · 菜单栏中文会不会被截断
+#    它能验的是「**能不能跑起来 / 能不能干活**」：
+#      PyInstaller 能不能通、.app 起不起得来、字体解析对不对、中文字幕烧不烧得出来。
+#    → 界面问题仍然只能等真 Mac 上人肉看。
+#
+# 用法：GitHub 仓库页 → Actions → 左侧「Mac 打包」→ Run workflow
+#       跑完在该次运行的页面底部 Artifacts 里下载 视频工具-macOS.zip
+# ───────────────────────────────────────────────────────────────────────
+
+on:
+  workflow_dispatch:            # 只手动触发（省额度，见上面说明）
+    inputs:
+      run_tests:
+        description: '顺带跑一遍字体/格式检查与字幕烧录冒烟测试'
+        type: boolean
+        default: true
+      make_dmg:
+        description: '额外打一个 .dmg（不勾也行，.zip 已够用）'
+        type: boolean
+        default: false
+
+concurrency:
+  group: mac-package-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  package:
+    runs-on: macos-latest          # arm64；想试 Intel 版改成 macos-13
+    timeout-minutes: 45            # 卡住时别白烧额度
+
+    env:
+      QT_QPA_PLATFORM: offscreen   # CI 没显示器，禁止 Qt 弹窗
+      HOMEBREW_NO_AUTO_UPDATE: "1"
+      HOMEBREW_NO_INSTALL_CLEANUP: "1"
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # 只取当前这一次提交，别拖历史（省时间）
+          fetch-depth: 1
+
+      # 定位代码目录：兼容「mac/ 当仓库根」和「video-tool 当仓库根(mac 是子目录)」
+      - name: 定位代码目录
+        id: loc
+        run: |
+          if [ -f "$GITHUB_WORKSPACE/mac/subtitle.py" ]; then
+            echo "CODE=$GITHUB_WORKSPACE/mac" >> "$GITHUB_ENV"
+          elif [ -f "$GITHUB_WORKSPACE/subtitle.py" ]; then
+            echo "CODE=$GITHUB_WORKSPACE" >> "$GITHUB_ENV"
+          else
+            echo "❌ 找不到 subtitle.py，请检查仓库布局"; exit 1
+          fi
+          echo "代码目录 = $CODE"
+          echo "runner 架构 = $(uname -m)"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'     # 3.12 的 PySide6 wheel 最稳；别用太新的版本
+
+      # ── 1. 先跑不依赖 PySide6 的保底检查（快，坏了立刻知道）─────────────
+      - name: 字体解析 + 交付物格式检查
+        if: ${{ inputs.run_tests }}
+        run: |
+          cd "$CODE"
+          echo "───── 字体跨平台检查 ─────"
+          python3 _dev_tests/_verify_mac_fonts.py
+          echo "───── 交付物格式检查 ─────"
+          python3 _dev_tests/_verify_mac_format.py
+          echo "───── 平台适配检查 ─────"
+          python3 _dev_tests/_verify_mac_platform.py
+
+      # ── 2. 装依赖 ────────────────────────────────────────────────────
+      - name: 装 PyInstaller 与 PySide6
+        run: |
+          python3 -m pip install --upgrade pip
+          python3 -m pip install pyinstaller PySide6
+
+      - name: 确认依赖版本
+        run: |
+          python3 -c "import PySide6, PyInstaller, sys; \
+            print('Python   :', sys.version.split()[0]); \
+            print('PySide6  :', PySide6.__version__); \
+            print('PyInst  :', PyInstaller.__version__)"
+
+      # ── 3. 打包（核心步骤，直接调你那个脚本）──────────────────────────
+      #
+      # ⚠️ 这里**故意直接调 打包mac.sh**，而不是把打包逻辑抄一份到 workflow 里。
+      #    这样「CI 里跑的」和「你在自己 Mac 上跑的」是**同一份脚本** ——
+      #    如果 CI 能过而本地不行，那才是环境问题，不会因为脚本有两份而互相掩盖。
+      #
+      # ⚠️ 脚本默认 --both（还会去下另一架构的 ffmpeg，多花 1~2 分钟）。
+      #    CI 里 .app 只装得下本机架构那一份，所以用 --one 省时间。
+      - name: 打包（跑 打包mac.sh --one）
+        run: |
+          cd "$CODE"
+          bash 打包mac.sh --one 2>&1 | tee /tmp/build.log
+          # tee 是为了让日志既进 GitHub 的界面，也留一份给下面的步骤用
+
+      - name: 确认产物真的出来了
+        run: |
+          cd "$CODE"
+          APP="$CODE/dist/视频工具.app"
+          if [ ! -d "$APP" ]; then
+            echo "❌ 没找到 $APP"
+            echo "───── 打包日志尾部 ─────"
+            tail -60 /tmp/build.log || true
+            exit 1
+          fi
+          echo "✅ 找到 .app"
+          du -sh "$APP"
+          echo "架构：$(lipo -archs "$APP/Contents/MacOS/视频工具" 2>/dev/null || file "$APP/Contents/MacOS/视频工具")"
+          echo "───── 内置 ffmpeg ─────"
+          ls -la "$APP/Contents/Resources/ffmpeg/" 2>/dev/null || \
+            find "$APP" -name 'ffmpeg' -o -name 'ffprobe' | head -20
+
+      # ── 4. 在真 Mac 上启动 .app 跑自检 ────────────────────────────────
+      #
+      # 这一步比「打包成功」重要得多 —— 能验证 .app 真的**起得来**、
+      # 内置 ffmpeg 找得到、字体解析得到。打包成功 ≠ 能用。
+      - name: .app 自检（真机启动）
+        run: |
+          cd "$CODE"
+          EXE="dist/视频工具.app/Contents/MacOS/视频工具"
+          echo "───── 直接跑 --selftest ─────"
+          if "$EXE" --selftest 2>&1 | tee /tmp/selftest.log; then
+            if grep -q "全部正常" /tmp/selftest.log; then
+              echo "✅ 自检通过：全部正常"
+            else
+              echo "⚠️ 自检跑完了但结论不是「全部正常」"
+              cat /tmp/selftest.log
+            fi
+          else
+            echo "⚠️ 自检返回非 0（可能是 CI 无显示器导致，看下面的输出）"
+            cat /tmp/selftest.log || true
+          fi
+
+      # ── 5. 真机烧一条中文字幕（验证字体 + freetype 真出中文字形）──────
+      - name: 烧中文字幕（drawtext 路）
+        if: ${{ inputs.run_tests }}
+        run: |
+          cd "$CODE"
+          # 先弄个测试源视频
+          FF=$(find "$CODE/dist/视频工具.app" -name ffmpeg -type f | head -1)
+          [ -n "$FF" ] || FF=ffmpeg
+          echo "用这个 ffmpeg: $FF"
+          "$FF" -y -f lavfi -i "testsrc=duration=3:size=1080x1920:rate=30" \
+                -pix_fmt yuv420p /tmp/src.mp4
+
+          python3 - <<'PY'
+          import subtitle
+          fonts = subtitle.available_fonts()
+          print("Mac 上探测到的中文字体：")
+          for n, p in fonts:
+              print("   ", n, "->", p)
+          assert fonts, "❌ 一个中文字体都没找到，字幕会是方块"
+
+          name, fp = fonts[0]
+          ok, msg = subtitle.burn_subtitle_manual(
+              "/tmp/src.mp4", "/tmp/burned.mp4",
+              "广审测试 中文显示正常", 40, "#FFFFFF", 100,
+              "bottom", "center", True, "9:16", font_file=fp)
+          print(("✅" if ok else "❌"), "drawtext 烧录：", msg)
+          assert ok, "烧录失败"
+          PY
+
+      # ── 6. 打 zip / 可选 dmg ─────────────────────────────────────────
+      - name: 打包 .app 为 zip
+        run: |
+          cd "$CODE/dist"
+          # ⚠️ 用 ditto 不用 zip：ditto 会保留 macOS 的扩展属性与符号链接，
+          #    解压出来的 .app 才是完整可双击的；普通 zip 可能丢资源叉。
+          #    （.app 是个**文件夹**，必须整个压，不能只压里面的东西）
+          ditto -c -k --keepParent "视频工具.app" "$RUNNER_TEMP/视频工具-macOS-arm64.zip"
+          ls -lh "$RUNNER_TEMP/视频工具-macOS-arm64.zip"
+
+      - name: 顺便把外置 ffmpeg 文件夹也带上
+        run: |
+          cd "$CODE/dist"
+          # .app 旁边的 ffmpeg/ 是「可替换的那份」，一起发方便对方将来换版本
+          if [ -d "ffmpeg" ]; then
+            cp -R "ffmpeg" "$RUNNER_TEMP/ffmpeg-外置"
+            (cd "$RUNNER_TEMP" && zip -qr 视频工具-macOS-arm64.zip "ffmpeg-外置" \
+               && echo "已附加外置 ffmpeg/" )
+          else
+            echo "（dist/ffmpeg 不存在，跳过）"
+          fi
+
+      - name: 打 dmg（可选）
+        if: ${{ inputs.make_dmg }}
+        run: |
+          cd "$CODE/dist"
+          hdiutil create -volname "视频工具" -srcfolder "视频工具.app" \
+                  -ov -format UDZO "$RUNNER_TEMP/视频工具-macOS-arm64.dmg" || true
+          ls -lh "$RUNNER_TEMP"/*.dmg 2>/dev/null || echo "dmg 没生成（不影响 zip）"
+
+      # ── 7. 上传 ──────────────────────────────────────────────────────
+      - name: 上传 .app 成品
+        uses: actions/upload-artifact@v4
+        with:
+          name: 视频工具-macOS-arm64
+          path: ${{ runner.temp }}/视频工具-macOS-arm64.zip
+          if-no-files-found: error
+          retention-days: 14         # 14 天后自动清（省空间，也提醒你及时下载）
+
+      - name: 上传烧录样例视频（供肉眼看中文字形）
+        if: ${{ always() && inputs.run_tests }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: 中文字幕烧录样例
+          path: /tmp/burned.mp4
+          if-no-files-found: warn
+          retention-days: 7
+
+      - name: 上传打包日志（出错时用来看原因）
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: 打包日志
+          path: |
+            /tmp/build.log
+            /tmp/selftest.log
+          if-no-files-found: warn
+          retention-days: 7

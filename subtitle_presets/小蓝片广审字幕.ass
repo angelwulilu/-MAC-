@@ -1,0 +1,16 @@
+[Script Info]
+Title: 广审字幕
+ScriptType: v4.00+
+PlayResX: 1080
+PlayResY: 1920
+ScaledBorderAndShadow: yes
+
+[V4+ Styles]
+Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
+
+Style: Default,Microsoft YaHei,36,&H00FFFFFF,&H00FFFFFF,&H00000000,&H00000000,1,0,0,0,100,100,0,0,1,2,0,2,15,15,8,1
+
+[Events]
+Format: Layer, Start, End, Style, Text
+
+Dialogue: 0,0:00:00.00,9:59:59.00,Default,闽械广审(视)第280110-00500号\N国械注准20233160159\N请仔细阅读产品说明书或者在医务人员的指导下购买和使用\N禁忌内容或者注意事项详见说明书

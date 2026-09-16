@@ -1,0 +1,127 @@
+name: Mac 真机冒烟测试（字幕烧录 + 字体探测）
+
+# ───────────────────────────────────────────────────────────────────────
+# 这是「免费真 macOS」环境：GitHub 的 macos-latest runner 是真实的 Mac 机器。
+#   · 公开仓库：macOS 分钟无限免费
+#   · 私有仓库 Free：每月 2000 分钟按 10x 折算 ≈ 200 个 macOS 分钟（够跑二三十次）
+# 限制：CI 没有显示器，GUI 窗口点不了。本程序的「干活」逻辑
+#      （ffmpeg 字幕烧录 / 字体探测 / 模块可 import）是纯命令行，在
+#      QT_QPA_PLATFORM=offscreen 下能真机验证。GUI 交互需借真 Mac 看。
+#
+# 用法（把 mac/ 单独作为 Git 仓库最简单）：
+#   1) cd D:\video-tool\mac && git init && git add -A && git commit && git remote add origin <你的仓库> && git push
+#   2) GitHub 仓库页 → Actions → 左侧「Mac 真机冒烟测试」→ Run workflow
+#   3) 跑完在 Artifacts 里下载 mac-burned-sample.mp4，肉眼看中文字形对不对
+#
+# 仓库布局兼容：无论把 mac/ 当仓库根，还是把整个 video-tool 当仓库根
+#              （mac/ 作为子目录），本 workflow 都能自动定位代码目录。
+# ───────────────────────────────────────────────────────────────────────
+
+on:
+  workflow_dispatch:            # 手动触发
+  # 🔴 原来是 push 就自动跑 —— 那会**每推一次代码就烧一次 macOS 额度**。
+  #    macOS runner 在私有仓库按 10 倍折算（免费 2000 分钟 ≈ 200 个 macOS 分钟），
+  #    随手推几次就没了。改成只手动触发，想测再点。
+  #    如果你的仓库设成 public，macOS 分钟无限免费，那可以放开成 push 自动跑：
+  #  push:
+  #    branches: ['**']
+
+concurrency:
+  group: mac-smoke-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  mac-smoke:
+    runs-on: macos-latest
+    env:
+      QT_QPA_PLATFORM: offscreen        # 防止任何 Qt 窗口在 CI 弹出
+      HOMEBREW_NO_AUTO_UPDATE: "1"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: 定位代码目录（兼容 mac/ 为仓库根 或 video-tool/ 为仓库根）
+        id: loc
+        run: |
+          if [ -f "$GITHUB_WORKSPACE/mac/subtitle.py" ]; then
+            echo "CODE=$GITHUB_WORKSPACE/mac" >> "$GITHUB_ENV"
+          else
+            echo "CODE=$GITHUB_WORKSPACE" >> "$GITHUB_ENV"
+          fi
+          echo "代码目录 = $CODE"
+
+      - name: 准备 ffmpeg（GitHub 的 Mac 自带没有，用 brew 装；Homebrew 版自带 freetype/libass，字幕必需）
+        run: |
+          if ! command -v ffmpeg >/dev/null 2>&1; then
+            brew install ffmpeg
+          fi
+          ffmpeg -version | head -1
+          ffprobe -version | head -1
+
+      - name: 字体解析 + 交付物格式（不依赖 PySide6，先跑这道保底）
+        run: |
+          cd "$CODE"
+          python3 _dev_tests/_verify_mac_fonts.py
+          python3 _dev_tests/_verify_mac_format.py
+
+      - name: 装 PySide6（Mac 上提供对应 arm64 wheel）
+        run: pip install --upgrade pip PySide6
+
+      - name: 程序可 import（offscreen）+ 字幕接口可用
+        run: |
+          cd "$CODE"
+          python3 - <<'PY'
+          import paths, subtitle
+          fonts = subtitle.available_fonts()
+          print("Mac 上探测到的中文字体：", [n for n, _ in fonts])
+          assert fonts, "❌ Mac 上一个中文字体都没找到，字幕会烧成方块！"
+          print("find_ffmpeg() =", paths.find_ffmpeg())
+          try:
+              import app
+              print("✅ app 模块 import 成功（PySide6 能起）")
+          except Exception as e:
+              print("⚠️ app import 失败（GUI 真机交互需借 Mac 看）：", repr(e))
+          PY
+
+      - name: 真实烧录一条中文字幕（drawtext 路，验证 Mac 字体 + freetype 真出中文字形）
+        run: |
+          cd "$CODE"
+          ffmpeg -y -f lavfi -i testsrc=duration=2:size=1080x1920:rate=30 -pix_fmt yuv420p /tmp/test_src.mp4
+          python3 - <<'PY'
+          import subtitle
+          name, fp = subtitle.available_fonts()[0]
+          print("用于测试的中文字体：", name, fp)
+          ok, msg = subtitle.burn_subtitle_manual(
+              "/tmp/test_src.mp4", "/tmp/test_burned.mp4",
+              "广审测试 中文显示正常", 40, "#FFFFFF", 100,
+              "bottom", "center", True, "9:16", font_file=fp)
+          assert ok, "❌ 烧录失败：" + msg
+          print("✅ drawtext 字幕烧录成功 -> /tmp/test_burned.mp4")
+          PY
+
+      - name: 额外验证 .ass 预设烧录（libass 路，best-effort 不阻塞）
+        run: |
+          cd "$CODE"
+          python3 - <<'PY'
+          import os, shutil, subtitle
+          presets = sorted(f for f in os.listdir("subtitle_presets") if f.endswith(".ass"))
+          if presets:
+              ap = os.path.join("subtitle_presets", presets[0])
+              print("用预设验证 libass 路：", ap)
+              ok, msg = subtitle.burn_subtitle_ass("/tmp/test_src.mp4", "/tmp/test_burned_ass.mp4", ap)
+              print(("✅" if ok else "⚠️"), "libass 路：", msg)
+              if ok and os.path.isfile("/tmp/test_burned_ass.mp4"):
+                  shutil.copy("/tmp/test_burned_ass.mp4", "/tmp/test_burned.mp4")
+          else:
+              print("没有 .ass 预设可测")
+          PY
+
+      - name: 上传成品供肉眼检查
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mac-burned-sample
+          path: /tmp/test_burned.mp4
