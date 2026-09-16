@@ -232,12 +232,30 @@ git status --short | head -40
 ### 第 6 步：在 GitHub 上点一次打包
 
 1. 打开你的仓库页 → 顶部 **Actions** 标签
-2. 左边列表里选 **「Mac 打包（免费真机跑 PyInstaller，产出 .app）」**
-3. 右侧点 **Run workflow** 按钮 → 弹出的表单里：
+
+   ⚠️ **左边列表里有两个 workflow，别点错：**
+
+   | 点哪个 | 名字 | 有表单吗 | 耗时 | 你什么时候用它 |
+   |---|---|---|---|---|
+   | ✅ **点这个** | **Mac 打包（产出 .app 成品 ← 要这个）** | **有**：`run_tests` + `make_dmg` | 6~10 分钟 | **要 .app 成品** |
+   | ⬜ 别点 | Mac 冒烟测试（字幕+字体，不管打包） | 有：`burn_sample` | 3~5 分钟 | 只想快验一下字幕/字体 |
+
+   > **怎么快速确认自己点对了**：点 **Run workflow** 之后应该**弹出一个表单**。
+   > 如果看到 `run_tests` 这个勾选项 → **点对了**。
+   > 如果看到的是 `burn_sample` → 你点的是冒烟测试，那个**不打包 .app**。
+
+   > **看不到 `run_tests` 的两种可能**：
+   > ① **点错 workflow 了**（最常见）—— 表单里有 `burn_sample` 而不是 `run_tests`，
+   >    说明你选的是「Mac 冒烟测试」。回左侧列表换选带「**产出 .app**」的那个。
+   > ② 列表里**只有冒烟测试、没有「Mac 打包」** → 说明 `mac-package.yml` 没推上去。
+   >    本地确认：`git ls-tree -r --name-only origin/main | findstr workflows`
+   >    应该看到两个文件；少一个就重新推。
+
+2. 选好 workflow 后，右侧点 **Run workflow** 按钮 → 弹出的表单里：
    - `run_tests` 保持勾选（顺带跑字体检查 + 烧一条中文字幕）
    - `make_dmg` 不用勾（zip 已经够用）
-4. 点绿色的 **Run workflow** 确认
-5. 等 **6~10 分钟**（页面会自动刷新，也能看到每步的实时日志）
+3. 点绿色的 **Run workflow** 确认
+4. 等 **6~10 分钟**（页面会自动刷新，也能看到每步的实时日志）
 
 ### 第 7 步：下载成品
 
@@ -298,6 +316,22 @@ git status --short | head -40
 A：① 确认推送成功（刷新仓库页能看到 `.github/workflows/mac-package.yml`）；
 ② 只有**默认分支**（`main`）上的 workflow 才会出现在列表里；
 ③ 刚推完可能要等十几秒才刷新出来。
+
+**Q：点了 Run workflow 但表单里没有 `run_tests`？**
+A：**你点错 workflow 了。** 左边列表有两个，`run_tests` 在带「**产出 .app 成品**」
+字样的那个（`mac-package.yml`）里。另一个「Mac 冒烟测试」的表单只有 `burn_sample`，
+而且它**不打包 .app**。换一个再点。
+
+**Q：左边列表里根本没有「Mac 打包」这一项？**
+A：说明 `mac-package.yml` 没推上去。在 `mac/` 目录里确认：
+```bash
+git ls-tree -r --name-only origin/main | grep workflows
+```
+应该列出**两个**文件。只列出一个或者为空 → 重新推一次：
+```bash
+git add -A && git commit -m "补 workflow" && git push origin main
+```
+推完回 Actions 页面按 F5 刷新。
 
 **Q：跑失败了怎么办？**
 A：点进失败的那次运行 → 看哪个步骤红了 → 展开日志。

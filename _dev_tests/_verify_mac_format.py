@@ -196,6 +196,45 @@ if os.path.isfile(pk_wf):
     # 仓库布局兼容（mac/ 当根 或 video-tool/ 当根）
     check("兼容两种仓库布局", "GITHUB_WORKSPACE/mac/subtitle.py" in wtext)
 
+    # 🔴 两个 workflow 名字必须能一眼区分 —— 用户曾点错，
+    #    在「Mac 冒烟测试」里找 run_tests（那是 mac-package.yml 的输入项）。
+    check("mac-package.yml 名字点明「产出 .app」",
+          "产出 .app" in wtext, wtext.splitlines()[0] if wtext else "")
+    check("mac-package.yml 说明别点错",
+          "别点错" in wtext or "点错" in wtext)
+    # 两个输入项必须都在（用户就是要找 run_tests）
+    check("有 run_tests 输入项", "run_tests" in wtext)
+    check("有 make_dmg 输入项", "make_dmg" in wtext)
+    check("输入项声明为 boolean 类型", "type: boolean" in wtext)
+    check("run_tests 默认勾选", "default: true" in wtext)
+
+sm_wf = os.path.join(wf_dir, "mac-smoke-test.yml")
+if os.path.isfile(sm_wf):
+    stext_wf = open(sm_wf, encoding="utf-8").read()
+    # 名字也要点明「不管打包」，否则和上面那个分不清
+    check("mac-smoke-test.yml 名字点明「不管打包」",
+          "不管打包" in stext_wf, stext_wf.splitlines()[0] if stext_wf else "")
+    # 它原本 workflow_dispatch 后面是空的 → 点 Run workflow 没表单，
+    # 用户会以为「没有 run_tests」。补一个输入项当「有表单」的信号。
+    check("冒烟测试也有输入项（给用户『有表单』的信号）",
+          "burn_sample" in stext_wf)
+    # 🔴 冒烟测试绝不能带 run_tests，否则两个 workflow 就真分不清了
+    check("冒烟测试不含 run_tests（避免混淆）", "run_tests" not in stext_wf)
+    check("冒烟测试不打包 .app",
+          "PyInstaller" not in stext_wf or "不打包" in stext_wf)
+    check("冒烟测试只手动触发", "workflow_dispatch" in stext_wf
+          and "\n  push:" not in stext_wf)
+    # 两个 workflow 名字不能一样
+    pk_name = ""
+    if os.path.isfile(pk_wf):
+        for ln in open(pk_wf, encoding="utf-8"):
+            if ln.startswith("name:"):
+                pk_name = ln.strip()
+                break
+    sm_name = stext_wf.splitlines()[0].strip() if stext_wf else ""
+    check("两个 workflow 名字不同", pk_name != sm_name,
+          "pk=%r sm=%r" % (pk_name, sm_name))
+
 # .gitignore 必须挡住会出问题的那几类
 gi = os.path.join(HERE, ".gitignore")
 check(".gitignore 存在", os.path.isfile(gi))
