@@ -78,6 +78,9 @@ jobs:
           cd "$CODE"
           python3 _dev_tests/_verify_mac_fonts.py
           python3 _dev_tests/_verify_mac_format.py
+          # 精简布局复跑：自检脚本里若有「查仓库外文件」的断言，本地能过、
+          # runner 上必挂（真发生过，见 mac-package.yml 里那段复盘）。这一步专门抓它。
+          python3 _dev_tests/_verify_runner_layout.py
 
       - name: 装 PySide6（Mac 上提供对应 arm64 wheel）
         run: pip install --upgrade pip PySide6

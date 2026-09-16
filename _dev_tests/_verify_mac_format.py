@@ -13,8 +13,27 @@ import sys
 
 HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
+# 🔴 上游目录到底是「完整的 video-tool」（Windows 侧）还是「只有 mac/」（GitHub runner）？
+#
+# 为什么要判这个：
+#   本脚本有一批断言是查 **Windows 侧工具**的（配置git.bat / _setup_git.py /
+#   推送mac到github.bat / _push_mac.py）——这四个文件在 D:\video-tool\ 下，
+#   **不在仓库里**。GitHub 仓库的根就是 mac/，runner 上 HERE 的父目录什么都没有。
+#   实测：runner 布局下这 4 条必然失败 → 整个脚本 exit 1 → CI 第 5 步
+#   「字体解析 + 交付物格式检查」1 秒就挂（run 35060031916 的真凶）。
+#
+# 判据：看父目录里有没有 Windows 主工程的特征文件（app.py / subtitle_presets/）。
+#   有  → 完整布局，Windows 侧断言**照常严格检查**（本地自检不能被放水）
+#   没有 → 精简布局（runner），这些断言**跳过**，不判失败
+UPSTREAM = os.path.dirname(HERE)
+HAS_WIN_SIDE = (
+    os.path.isfile(os.path.join(UPSTREAM, "app.py"))
+    or os.path.isdir(os.path.join(UPSTREAM, "subtitle_presets"))
+)
+
 fails = []
 oks = []
+skips = []
 
 
 def check(name, cond, extra=""):
@@ -24,6 +43,19 @@ def check(name, cond, extra=""):
     else:
         fails.append(name + (" | " + extra if extra else ""))
         print("  FAIL %s  %s" % (name, extra))
+
+
+def check_win_side(name, cond, extra=""):
+    """只对「完整 video-tool 布局」成立的断言。
+
+    在精简布局（GitHub runner，上游只有 mac/）下**跳过** —— 不是失败，
+    因为那些文件本来就不在仓库里，查不到是正常现象。
+    """
+    if not HAS_WIN_SIDE:
+        skips.append(name)
+        print("  SKIP %s  （上游只有 mac/，Windows 侧文件不在仓库里）" % name)
+        return
+    check(name, cond, extra)
 
 
 print("=" * 62)
@@ -111,8 +143,11 @@ print()
 
 # ------------------------------------------------- 工程分包脚本（Windows 侧）
 print("[1d] _package_mac_src.py（在 Windows 上打工程包）")
-pk = os.path.join(os.path.dirname(HERE), "_package_mac_src.py")
-check("文件存在", os.path.isfile(pk))
+# ⚠️ 这个脚本也在仓库外（D:\video-tool\），runner 上没有 → 用 check_win_side
+if not HAS_WIN_SIDE:
+    print("  （上游只有 mac/ —— 这是 Windows 侧打包脚本，跳过）")
+pk = os.path.join(UPSTREAM, "_package_mac_src.py")
+check_win_side("文件存在", os.path.isfile(pk))
 if os.path.isfile(pk):
     praw = open(pk, "rb").read()
     check("无 BOM", not praw.startswith(b"\xef\xbb\xbf"))
@@ -265,6 +300,19 @@ if os.path.isfile(sm_wf):
     check("两个 workflow 名字不同", pk_name != sm_name,
           "pk=%r sm=%r" % (pk_name, sm_name))
 
+# 🔴 两个 workflow 都必须跑「精简布局复跑」——这是防「只在本地能过」的硬防线。
+#    背景：自检脚本里查仓库外文件的断言曾让 CI 1 秒挂掉（run 35060031916）。
+#    _verify_runner_layout.py 把 mac/ 拷到临时目录当仓库根，复现 runner 布局再跑一遍，
+#    能抓出同类问题。少接一个 workflow，那条流水线就少了这道保险。
+_runner_verifier = "_verify_runner_layout.py"
+for _wf_name, _wf_path in (("mac-package.yml", pk_wf),
+                           ("mac-smoke-test.yml", sm_wf)):
+    _wt = open(_wf_path, encoding="utf-8").read() if os.path.isfile(_wf_path) else ""
+    check("%s 跑了精简布局复跑（防『只在本地能过』）" % _wf_name,
+          _runner_verifier in _wt, "缺 %s" % _runner_verifier)
+check("精简布局复跑脚本存在",
+      os.path.isfile(os.path.join(HERE, "_dev_tests", _runner_verifier)))
+
 # .gitignore 必须挡住会出问题的那几类
 gi = os.path.join(HERE, ".gitignore")
 check(".gitignore 存在", os.path.isfile(gi))
@@ -281,12 +329,14 @@ print()
 
 # ------------------------------------------------- 配置 git（Windows 侧）
 print("[3c] git 配置向导（Windows 侧，推代码前必做）")
-wt_root = os.path.dirname(HERE)          # video-tool/
+if not HAS_WIN_SIDE:
+    print("  （上游只有 mac/ —— 这组是 Windows 侧工具，跳过）")
+wt_root = UPSTREAM                       # video-tool/
 setup_bat = os.path.join(wt_root, "配置git.bat")
 setup_py = os.path.join(wt_root, "_setup_git.py")
 
-check("配置git.bat 存在（Windows 双击入口）", os.path.isfile(setup_bat))
-check("_setup_git.py 存在（实际逻辑）", os.path.isfile(setup_py))
+check_win_side("配置git.bat 存在（Windows 双击入口）", os.path.isfile(setup_bat))
+check_win_side("_setup_git.py 存在（实际逻辑）", os.path.isfile(setup_py))
 
 if os.path.isfile(setup_bat):
     braw = open(setup_bat, "rb").read()
@@ -350,11 +400,14 @@ print()
 
 # ------------------------------------------------- 推送 github（Windows 侧）
 print("[3d] 推送向导（Windows 侧，把 mac/ 推上去）")
+if not HAS_WIN_SIDE:
+    print("  （上游只有 mac/ —— 这组是 Windows 侧工具，跳过）")
 push_bat = os.path.join(wt_root, "推送mac到github.bat")
 push_py = os.path.join(wt_root, "_push_mac.py")
 
-check("推送mac到github.bat 存在（Windows 双击入口）", os.path.isfile(push_bat))
-check("_push_mac.py 存在（实际逻辑）", os.path.isfile(push_py))
+check_win_side("推送mac到github.bat 存在（Windows 双击入口）",
+               os.path.isfile(push_bat))
+check_win_side("_push_mac.py 存在（实际逻辑）", os.path.isfile(push_py))
 
 if os.path.isfile(push_bat):
     praw = open(push_bat, "rb").read()
@@ -437,7 +490,7 @@ if os.path.isdir(ps):
     ass = sorted(f for f in os.listdir(ps) if f.lower().endswith(".ass"))
     # 不该写死数量（预设会增删）。真正的判据是「和 Windows 源码目录完全一致」，
     # 否则 Mac 版会悄悄少预设 / 多预设，用户在 Mac 上才发现。
-    win_ps = os.path.join(os.path.dirname(HERE), "subtitle_presets")
+    win_ps = os.path.join(UPSTREAM, "subtitle_presets")
     if os.path.isdir(win_ps):
         win_ass = sorted(f for f in os.listdir(win_ps) if f.lower().endswith(".ass"))
         check("预设与 Windows 版完全一致（%d 个）" % len(win_ass),
@@ -473,8 +526,155 @@ for dp, dns, fns in os.walk(HERE):
 check("没有混入 Windows .exe", not exes, str(exes[:3]))
 print()
 
+# ------------------------------------------------- 元检查：不许再引用仓库外文件
+#
+# 🔴 这一组是给「未来的自己」上的保险。
+#    bug 复盘（run 35060031916）：本脚本原来有 5 条断言指向 D:\video-tool\ 下的
+#    Windows 侧文件（配置git.bat / _setup_git.py / 推送mac到github.bat /
+#    _push_mac.py / _package_mac_src.py），而 GitHub 仓库的根就是 mac/ ——
+#    runner 上这些文件不存在 → 5 条断言失败 → exit 1 → CI 第 5 步 1 秒挂。
+#    本地永远测不出来（本地它们都在）。
+#
+#    所以现在加一条元检查：扫描本目录三个自检脚本的源码，凡是出现
+#    os.path.dirname(HERE) / 父目录拼接的地方，**必须**配套 check_win_side
+#    或显式的 HAS_WIN_SIDE 判断。否则直接判失败。
+print("[6] runner 布局安全性（别再有「只在本地能过」的断言）")
+import ast as _ast_meta
+
+_self_dir = os.path.join(HERE, "_dev_tests")
+# ⚠️ _verify_runner_layout.py 也扫 —— 它自己同样跑在 runner 上，
+#    要是它内部有「查仓库外文件」的逻辑，一样会挂。
+#    _verify_push_mac.py 不扫：它要连真远程，不适合在 CI 里跑。
+_meta_files = ["_verify_mac_format.py", "_verify_mac_fonts.py",
+               "_verify_mac_platform.py", "_verify_runner_layout.py"]
+
+for _fn in _meta_files:
+    _p = os.path.join(_self_dir, _fn)
+    if not os.path.isfile(_p):
+        check("%s 存在（元检查）" % _fn, False)
+
+_own = os.path.join(_self_dir, "_verify_mac_format.py")
+_own_src = open(_own, encoding="utf-8").read()
+_own_tree = _ast_meta.parse(_own_src)
+
+# ── 用 AST 精确判定，别用文本窗口（第一版用 6 行窗口，误报了 3 处：
+#    HAS_WIN_SIDE 的定义本身、win_ps 的降级分支、print 里的说明文字）──
+
+# 🔴 关键：真正的用法是**先赋给变量再查**，不是内联：
+#       setup_bat = os.path.join(UPSTREAM, "配置git.bat")
+#       check_win_side("配置git.bat 存在", os.path.isfile(setup_bat))
+#   所以第一步要收集「哪些变量名是 UPSTREAM 拼出来的」，第二步再看它们被谁用。
+_upstream_vars = set()
+for _node in _ast_meta.walk(_own_tree):
+    if isinstance(_node, _ast_meta.Assign):
+        # 右值里有没有 join(UPSTREAM|wt_root, ...)
+        _has = False
+        for _sub in _ast_meta.walk(_node.value):
+            if isinstance(_sub, _ast_meta.Call) and isinstance(_sub.func, _ast_meta.Attribute) \
+                    and _sub.func.attr == "join" and _sub.args:
+                _a0 = _sub.args[0]
+                if isinstance(_a0, _ast_meta.Name) and _a0.id in ("UPSTREAM", "wt_root"):
+                    _has = True
+        if _has:
+            for _t in _node.targets:
+                if isinstance(_t, _ast_meta.Name):
+                    _upstream_vars.add(_t.id)
+                # wt_root = UPSTREAM 这种链式别名
+                elif isinstance(_t, _ast_meta.Tuple):
+                    for _e in _t.elts:
+                        if isinstance(_e, _ast_meta.Name):
+                            _upstream_vars.add(_e.id)
+# 别名：wt_root = UPSTREAM
+for _node in _own_tree.body:
+    if isinstance(_node, _ast_meta.Assign) and len(_node.targets) == 1:
+        _t = _node.targets[0]
+        if isinstance(_t, _ast_meta.Name) and isinstance(_node.value, _ast_meta.Name) \
+                and _node.value.id in ("UPSTREAM", "wt_root"):
+            _upstream_vars.add(_t.id)
+
+# HAS_WIN_SIDE 是 bool，不是路径变量；留着会让检测变松
+# （`check("x", HAS_WIN_SIDE)` 也会被算成「受保护」）
+_upstream_vars.discard("HAS_WIN_SIDE")
+
+# 再看每个 check / check_win_side 调用，实参里有没有这些变量
+_upstream_file_checks = []
+for _node in _ast_meta.walk(_own_tree):
+    if not isinstance(_node, _ast_meta.Call):
+        continue
+    _fname = None
+    if isinstance(_node.func, _ast_meta.Name):
+        _fname = _node.func.id
+    if _fname not in ("check", "check_win_side"):
+        continue
+    _uses = False
+    for _sub in _ast_meta.walk(_node):
+        if isinstance(_sub, _ast_meta.Name) and _sub.id in _upstream_vars:
+            _uses = True
+        # 内联写法也要覆盖
+        if isinstance(_sub, _ast_meta.Call) and isinstance(_sub.func, _ast_meta.Attribute) \
+                and _sub.func.attr == "join" and _sub.args:
+            _a0 = _sub.args[0]
+            if isinstance(_a0, _ast_meta.Name) and _a0.id in ("UPSTREAM", "wt_root"):
+                _uses = True
+    if _uses:
+        _upstream_file_checks.append((_node.lineno, _fname == "check_win_side"))
+
+_unprotected = [ln for ln, protected in _upstream_file_checks if not protected]
+check("查上游目录的 check 都用了 check_win_side（共 %d 处，认到变量 %s）"
+      % (len(_upstream_file_checks), sorted(_upstream_vars)),
+      not _unprotected and len(_upstream_file_checks) > 0,
+      "未保护行号：%s" % _unprotected)
+
+# ── 三个自检脚本里，AST 层面不许出现「用父目录拼出的路径」直接喂给 check ──
+#   （即：不允许 os.path.isfile(os.path.join(os.path.dirname(HERE), ...)) 这种）
+#   HAS_WIN_SIDE 的定义、UPSTREAM 的赋值本身不算。
+_bad = []
+for _fn in _meta_files:
+    _fp = os.path.join(_self_dir, _fn)
+    if not os.path.isfile(_fp):
+        continue
+    _tree = _ast_meta.parse(open(_fp, encoding="utf-8").read())
+    for _node in _ast_meta.walk(_tree):
+        if isinstance(_node, _ast_meta.Call) and isinstance(_node.func, _ast_meta.Attribute) \
+                and _node.func.attr == "join":
+            # 直接内联 dirname(HERE) 当第一个参数 → 危险
+            if _node.args and isinstance(_node.args[0], _ast_meta.Call) \
+                    and isinstance(_node.args[0].func, _ast_meta.Attribute) \
+                    and _node.args[0].func.attr == "dirname":
+                _bad.append((_fn, _node.lineno))
+check("没有脚本内联 dirname(HERE) 拼路径（统一走 UPSTREAM 变量）",
+      not _bad, str(_bad[:3]))
+
+# ── 真的碰了上游目录的脚本，必须显式声明 HAS_WIN_SIDE（让「跳过」意图可读）──
+#    ⚠️ 判据不能只看文本里有没有 "UPSTREAM" 字样 —— 注释里提到也算，
+#    会误报（_verify_runner_layout.py 只在注释里解释了这件事）。
+#    改成用 AST 看：有没有真的 `os.path.join(UPSTREAM|wt_root, ...)` 这种调用。
+for _fn in _meta_files:
+    _fp = os.path.join(_self_dir, _fn)
+    if not os.path.isfile(_fp):
+        continue
+    _txt = open(_fp, encoding="utf-8").read()
+    _t = _ast_meta.parse(_txt)
+    _really_touches = False
+    for _n in _ast_meta.walk(_t):
+        if isinstance(_n, _ast_meta.Call) and isinstance(_n.func, _ast_meta.Attribute) \
+                and _n.func.attr == "join" and _n.args:
+            _a0 = _n.args[0]
+            # 直接 UPSTREAM/wt_root，或别名字符串赋值（如 os.path.join(UPSTREAM, ...)）
+            if isinstance(_a0, _ast_meta.Name) and _a0.id in ("UPSTREAM", "wt_root"):
+                _really_touches = True
+    if _really_touches:
+        _has_decl = ("HAS_WIN_SIDE" in _txt) or ("check_win_side" in _txt)
+        check("%s 碰了上游目录并声明了跳过逻辑" % _fn, _has_decl,
+              "用了 UPSTREAM 拼接但没有 HAS_WIN_SIDE/check_win_side")
+print()
+
 print("=" * 62)
-print("通过 %d 项，失败 %d 项" % (len(oks), len(fails)))
+if skips:
+    print("通过 %d 项，失败 %d 项，跳过 %d 项" % (len(oks), len(fails), len(skips)))
+    print("（跳过的是 Windows 侧文件检查 —— 上游只有 mac/ 时本就不该有它们）")
+else:
+    print("通过 %d 项，失败 %d 项" % (len(oks), len(fails)))
 if fails:
     print()
     for f in fails:

@@ -86,6 +86,18 @@ jobs:
           python-version: '3.12'     # 3.12 的 PySide6 wheel 最稳；别用太新的版本
 
       # ── 1. 先跑不依赖 PySide6 的保底检查（快，坏了立刻知道）─────────────
+      #
+      # 🔴 这一组曾经把 CI 卡死过：run 35060031916 在这里 **1 秒就 exit 1**，
+      #    但本地（Windows）262 项全过。原因是自检脚本里有一批断言查的是
+      #    **仓库外**的 Windows 侧文件（配置git.bat / _setup_git.py /
+      #    推送mac到github.bat / _push_mac.py / _package_mac_src.py）——
+      #    这些文件在 D:\video-tool\ 下，而仓库的根就是 mac/，runner 上没有。
+      #    修法：这类断言统一走 check_win_side()，精简布局下「跳过」而不是「失败」。
+      #    并且加了 [6] 元检查 + _verify_runner_layout.py 双重防回归。
+      #
+      # ⚠️ 最后那个 _verify_runner_layout.py 是**自检的自检**：
+      #    它把 mac/ 拷到临时目录当仓库根，在那份「runner 同款布局」里再跑一遍
+      #    上面三个脚本。它能抓出「只在本地能过」的断言 —— 也就是这类 bug 的未来版本。
       - name: 字体解析 + 交付物格式检查
         if: ${{ inputs.run_tests }}
         run: |
@@ -96,6 +108,8 @@ jobs:
           python3 _dev_tests/_verify_mac_format.py
           echo "───── 平台适配检查 ─────"
           python3 _dev_tests/_verify_mac_platform.py
+          echo "───── 精简布局复跑（模拟 runner 目录，防『只在本地能过』）─────"
+          python3 _dev_tests/_verify_runner_layout.py
 
       # ── 2. 装依赖 ────────────────────────────────────────────────────
       - name: 装 PyInstaller 与 PySide6
