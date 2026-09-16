@@ -353,8 +353,18 @@ git add -A && git commit -m "补 workflow" && git push origin main
 推完回 Actions 页面按 F5 刷新。
 
 **Q：跑失败了怎么办？**
-A：点进失败的那次运行 → 看哪个步骤红了 → 展开日志。
-最省事的是把 **「打包日志」Artifact** 下载下来发我。
+A：点进失败的那次运行 → 页面**最底部 Artifacts** → 下载 **「自检详细日志」**。
+那个 zip 里有：
+
+| 文件 | 里面是什么 |
+|---|---|
+| `00-环境.txt` | runner 的真实环境（系统 / Python 版本 / 目录布局） |
+| `_verify_mac_fonts.txt` 等 4 个 | **每个自检脚本的完整输出** |
+| `99-失败汇总.txt` | 所有 FAIL 行集中列出，**一眼看完** |
+
+> ✅ **实测有效**：第 5 步连挂两轮、猜了好几个方向都不对，
+> 最后就是靠这个 zip **一次定位到真根因**（见下面那条 Q）。
+> 所以现在只要失败，**先下这个**。
 
 **Q：日志看不了 / 只有一句「Process completed with exit code 1」？**
 A：分两种情况：
@@ -390,27 +400,46 @@ ls -la $CODE        ← 仓库根到底是什么布局
 把里面 FAIL 那几行截图发我 —— 新版会把完整输出打在那里。
 
 **Q：第 5 步「字体解析 + 交付物格式检查」秒挂（exit 1）？**
-A：这一坑踩过一次，记下来：自检脚本里有一批断言查的是
+A：这一坑踩过**两次**，两次都是「本地全过、runner 秒挂」。记下来：
+
+**第一次 —— 布局维度**：自检脚本里有一批断言查的是
 **仓库外**的 Windows 侧文件（`配置git.bat` / `_setup_git.py` /
 `推送mac到github.bat` / `_push_mac.py` / `_package_mac_src.py`）。
-这些文件在 `D:\video-tool\` 下 —— 但 GitHub 仓库的根**就是 `mac/`**，
-所以 runner 上一个都找不到 → 断言失败 → 整个脚本 `exit 1`。
-**本地永远测不出来**（本地这些文件都在），所以在 Mac 上遇到
-「本地全过、CI 秒挂」时，先怀疑这一类。
+这些文件在 `D:\video-tool\` 下 —— 但仓库的根**就是 `mac/`**，
+所以 runner 上一个都找不到 → 5 条断言失败 → `exit 1`。
 
-现在已经修好并且上了双保险：
-- 这类断言统一走 `check_win_side()`：**找不到就「跳过」，不判失败**
-- `_verify_runner_layout.py` 会**把 `mac/` 拷到临时目录假装成仓库根**，
-  在那份「runner 同款布局」里把三个自检脚本再跑一遍 —— 专门抓这种 bug
-- `_verify_mac_format.py` 的 `[6]` 组是**元检查**：用 AST 扫源码，
-  发现「没受保护的上游目录引用」直接报错
+**第二次 —— 平台维度**（修完布局还是挂）：两个原因
+1. `_verify_mac_platform.py` 里有 5 条断言写的是
+   「`paths.py` 在 **Windows** 行为不变」—— 在 macOS 上必然全挂。
+2. `_verify_mac_format.py` 断言「`mac/` 下不存在 `__pycache__`」——
+   而 CI 刚跑过 `python3 _dev_tests/*.py`，Python **必然**生成它。
+   这是**口径写错**：该验的是「`.gitignore` 排掉了它」，
+   不是「磁盘上没有」。（本地过只是因为跑测试前恰好没生成。）
 
-想在本机自查有没有这类问题（Windows 上也能跑）：
+**「本地全过、CI 秒挂」的通用规律**：断言里混进了
+**只在本机成立的前提** —— 本机有那个文件（布局）、本机是那个系统（平台）、
+本机那个缓存恰好没生成（状态）。遇到就先往这三类上找。
+
+现在上了**三重**保险：
+- 查仓库外文件的断言 → `check_win_side()`；只对 Windows 成立的 → `check_windows()`
+  （都改成「跳过」而不是「失败」）
+- `_verify_runner_layout.py`：把 `mac/` 拷到临时目录当仓库根，
+  **并把 `sys.platform` 伪装成 `darwin`** —— 「布局 + 平台」两个维度一起复现。
+  ⚠️ 第一版只模拟了布局，所以第二次这类 bug 又漏过去了
+- `_verify_mac_format.py` 的 `[6]`/`[7]` 组**元检查**：用 AST 扫源码，
+  发现「没受保护的上游目录引用」或「运行时断言 Windows 行为却是裸 `check`」
+  直接报错。（已用钓鱼断言验证过防线真的有效。）
+
+想在本机自查（Windows 上也能跑）：
 ```bash
 cd mac
 python _dev_tests/_verify_runner_layout.py
 ```
 输出 `通过 3 个脚本，失败 0 个` 就说明 CI 那关能过。
+想更贴近 CI 再跑一次「假装在 Mac 上」：
+```bash
+python _dev_tests/_verify_runner_layout.py   # 内部已含 darwin 伪装
+```
 
 **Q：报 403 / 权限错误？**
 A：仓库 Settings → Actions → General → Workflow permissions →
