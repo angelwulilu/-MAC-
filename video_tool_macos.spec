@@ -81,6 +81,10 @@ _presets = os.path.join(PROJ, "subtitle_presets")
 if os.path.isdir(_presets):
     # 打进包里一份：首次运行会自动拷到程序旁边，之后用户可以自由增删
     datas.append((_presets, "subtitle_presets"))
+_fonts = os.path.join(PROJ, "fonts")
+if os.path.isdir(_fonts):
+    # 内置中文字体（思源黑体 / Noto Sans SC），避免依赖用户系统是否装了中文字体
+    datas.append((_fonts, "fonts"))
 _ref = os.path.join(PROJ, "encode_reference.json")
 if os.path.isfile(_ref):
     datas.append((_ref, "."))
@@ -211,8 +215,8 @@ if os.path.isdir(_FF_DIR) and not os.path.isdir(_side_ff):
     except Exception as _e:
         print("[spec] ffmpeg 外置副本失败（不影响运行，.app 内已有）:", _e)
 
-# 预设 / 编码参考：复制到 .app 旁边
-for _sub in ("subtitle_presets", "encode_reference.json"):
+# 预设 / 编码参考 / 字体：复制到 .app 旁边
+for _sub in ("subtitle_presets", "encode_reference.json", "fonts"):
     _src = os.path.join(_RES, _sub)
     _dst = os.path.join(DISTPATH, APP_NAME, _sub)
     if os.path.exists(_src) and not os.path.exists(_dst):

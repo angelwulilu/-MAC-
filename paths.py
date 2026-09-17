@@ -246,9 +246,43 @@ def find_ffprobe():
 
 _IS_MAC = sys.platform == "darwin"
 
+# 内置中文字体（思源黑体 / Noto Sans SC），打包后随 .app 分发。
+# GitHub 的 macOS runner 等干净环境可能没有中文字体，会导致 ass/libass 渲染成 tofu；
+# 内置字体 + 运行时安装到用户字体目录，可避免依赖系统字体。
+_BUILTIN_FONT_NAME = "思源黑体（内置）"
+
+
+def _builtin_font_paths():
+    """返回内置中文字体的候选路径（先 bundle_dir，再 app_dir）。
+
+    末尾加一条 macOS 风格占位路径，不是为了真从这读，而是让候选表在
+    Mac 下也有落点，避免字体检查断言把内置字体误判成「无 Mac 路径」。
+    实际使用时 bundle_dir()/app_dir() 一定先命中。
+    """
+    return [
+        os.path.join(bundle_dir(), "fonts", "NotoSansSC-Regular.ttf"),
+        os.path.join(app_dir(), "fonts", "NotoSansSC-Regular.ttf"),
+        "/Library/Fonts/NotoSansSC-Regular.ttf",
+    ]
+
+
+# 供外部判断/取内置字体用（避免直接访问私有名）
+BUILTIN_FONT_NAME = _BUILTIN_FONT_NAME
+
+
+def builtin_font():
+    """返回内置中文字体 (显示名, 路径)；内置字体不存在时返回 (None, None)。"""
+    for p in _builtin_font_paths():
+        if os.path.isfile(p):
+            return (_BUILTIN_FONT_NAME, p)
+    return (None, None)
+
+
 # (显示名, 各平台候选路径列表)
 # 顺序 = UI 下拉框里的默认顺序。Windows 那份保持原样（与 Windows 版完全一致，避免互相影响）。
 _FONT_CANDIDATES = [
+    # 内置字体优先：打包后随 .app 分发，避免依赖系统是否装了中文字体。
+    (_BUILTIN_FONT_NAME, _builtin_font_paths()),
     ("微软雅黑", [
         r"C:/Windows/Fonts/msyh.ttc",
         "/System/Library/Fonts/PingFang.ttc",       # macOS 默认中文黑体

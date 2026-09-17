@@ -9,6 +9,7 @@ subtitle.py —— 批量给视频添加固定字幕（广审等）
 
 import os
 import re
+import shutil
 import subprocess
 import sys
 import threading
@@ -59,6 +60,35 @@ ASPECT_RATIOS = {
     "1:1":  (1080, 1080),
     "4:3":  (1440, 1080),
 }
+
+
+def _install_builtin_font():
+    """把内置中文字体复制到用户字体目录，让 libass / CoreText 能命中。
+
+    这是为 .ass 预设字幕准备的：libass 在 macOS 上走 CoreText，只认
+    「安装到系统字体目录」的字体；光把字体打进 .app 内部还不够。
+    drawtext 路直接传 fontfile，不依赖字体安装。
+
+    best-effort：找不到内置字体或没权限时静默跳过，绝不阻塞烧录。
+    """
+    try:
+        name, src = paths.builtin_font()
+        if not src or not os.path.isfile(src):
+            return
+        if sys.platform == "darwin":
+            dest_dir = os.path.expanduser("~/Library/Fonts")
+        elif os.name == "nt":
+            dest_dir = os.path.join(
+                os.environ.get("LOCALAPPDATA", os.path.expanduser("~\\AppData\\Local")),
+                "Microsoft", "Windows", "Fonts")
+        else:
+            return
+        os.makedirs(dest_dir, exist_ok=True)
+        dest = os.path.join(dest_dir, os.path.basename(src))
+        if not os.path.isfile(dest):
+            shutil.copy2(src, dest)
+    except Exception:
+        pass
 
 
 # ---------------- drawtext 滤镜构造 ----------------
@@ -294,6 +324,7 @@ def burn_subtitle_manual(input_path, output_path, text, fontsize, color_hex, opa
                           position, alignment, outline, aspect, font_file=None,
                           preset="fast", crf="18", ctrl=None):
     """用手动文本烧字幕，返回 (success, message)"""
+    _install_builtin_font()  # best-effort：让 libass/CoreText 也能命中内置字体
     cmd = build_burn_command_manual(input_path, output_path, text, fontsize, color_hex,
                                      opacity, position, alignment, outline, aspect,
                                      font_file, preset, crf)
@@ -302,6 +333,7 @@ def burn_subtitle_manual(input_path, output_path, text, fontsize, color_hex, opa
 
 def burn_subtitle_ass(input_path, output_path, ass_path, preset="fast", crf="18", ctrl=None):
     """用 .ass 文件烧字幕，返回 (success, message)"""
+    _install_builtin_font()  # .ass 路走 libass/CoreText，必须先把内置字体装进用户字体目录
     cmd = build_burn_command_ass(input_path, output_path, ass_path, preset, crf)
     return _run_ffmpeg(cmd, output_path, ctrl)
 
