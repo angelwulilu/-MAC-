@@ -57,6 +57,9 @@ ehthumbs.db
 Desktop.ini
 *.lnk
 
+# WorkBuddy 的工作区记忆（给「专项任务」窗口用的上下文，不进仓库）
+.workbuddy/
+
 # 编辑器
 .vscode/
 .idea/
