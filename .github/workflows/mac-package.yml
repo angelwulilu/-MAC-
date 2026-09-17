@@ -368,6 +368,18 @@ jobs:
       #    所以加 continue-on-error：它挂了也不影响你把 .app 拿走。
       #    2026-09-17 run #7 就是它挂了（2 秒），把后面的 zip + 上传全带成 skipped，
       #    结果 .app 明明打好了却下不到 —— 教训：产物步骤要在验证步骤**之前**。
+      - name: 准备 ffmpeg（带 drawtext，烧录校验要用）
+        if: ${{ inputs.run_tests }}
+        run: |
+          # 🔴 与冒烟测试同理：brew 装的 ffmpeg 9.0.1_1 没有 --enable-libfreetype
+          #   → 没有 drawtext 滤镜。paths.find_ffmpeg() 第 1 优先级是 $CODE/ffmpeg/ffmpeg，
+          #   这里放一份带 drawtext 的静态构建，作为烧录校验步的兜底。
+          #   （优先用的是下面「烧中文字幕」步里 .app 内置的那份 ffmpeg，这里只是双保险。）
+          bash "$CODE/fetch_ffmpeg_mac.sh" "$CODE/ffmpeg"
+          echo "$CODE/ffmpeg" >> "$GITHUB_PATH"
+          ls -la "$CODE/ffmpeg"
+          ffmpeg -hide_banner -version 2>/dev/null | head -1 || true
+
       - name: 烧中文字幕（drawtext 路）
         if: ${{ inputs.run_tests }}
         continue-on-error: true
@@ -386,16 +398,26 @@ jobs:
           echo "───── /System/Library/Fonts 实际内容 ─────"
           ls -1 /System/Library/Fonts 2>/dev/null | head -40 || true
 
-          FF=$(find "$CODE/dist/视频工具.app" -name ffmpeg -type f | head -1)
+          APP="$CODE/dist/视频工具.app"
+          # 和「硬校验」步同样的解析：先试标准内置路径，再用 find（不限定 -type f，
+          # 否则 .app 里的 ffmpeg 若是符号链接会被 find 漏掉 → 退化成 brew 残缺版）。
+          FF="$APP/Contents/Resources/ffmpeg/ffmpeg"
+          [ -f "$FF" ] || FF=$(find "$APP" -name ffmpeg 2>/dev/null | head -1)
           [ -n "$FF" ] || FF=ffmpeg
           echo "用这个 ffmpeg: $FF"
+          export BURN_FFMPEG="$FF"
           "$FF" -y -f lavfi -i "testsrc=duration=3:size=1080x1920:rate=30" \
                 -pix_fmt yuv420p /tmp/src.mp4
 
           cat > /tmp/burn_check.py <<'PY'
-          import sys
+          import os, sys
           sys.path.insert(0, ".")
           import subtitle
+          # 优先用 .app 内置的那份 ffmpeg（真正要发出去的东西，已通过「硬校验」确认带 drawtext）；
+          # 取不到时退回 paths.find_ffmpeg()（CI 上已备好带 drawtext 的版本）。
+          _app_ff = os.environ.get("BURN_FFMPEG", "")
+          if _app_ff and os.path.isfile(_app_ff):
+              subtitle.FFMPEG = _app_ff
           fonts = subtitle.available_fonts()
           print("探测到的中文字体（subtitle.available_fonts）：")
           for n, p in fonts:
