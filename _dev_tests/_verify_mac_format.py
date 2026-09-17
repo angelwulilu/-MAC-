@@ -108,8 +108,12 @@ check("ffmpeg 下载有备选源（不只 osxexperts）", "evermeet.cx" in text)
 check("下载失败会换下一个源（不是直接放弃）", "换下一个" in text)
 check("下载带 --retry 容忍瞬时抖动", "--retry" in text)
 check("下载带 --max-time（别无限挂住）", "--max-time" in text)
-check("下载失败提示里给了 brew 兜底方案",
-      "brew install ffmpeg" in text)
+# 🔴 2026-09-17 改：这条原来要求「提示里给 brew 兜底」。
+#    但实测 runner 上 brew 装的 ffmpeg **没有 drawtext**（编译时缺 --enable-libfreetype），
+#    再写「brew install 一下就行」是**错建议** —— 会把人带进同一个坑。
+#    正确指引 = 手动放一个带 drawtext 的 ffmpeg 进 _bundled_ffmpeg/。
+check("下载失败提示里给了正确兜底方案（手动放带 drawtext 的 ffmpeg）",
+      "_bundled_ffmpeg/" in text and "drawtext" in text)
 print()
 
 # ------------------------------------------------- 一键打包.command（双击版）
@@ -853,6 +857,48 @@ check("workflow 装依赖也含 fontTools 与 freetype-py",
       "fontTools freetype-py" in _pkg_txt)
 check("打包日志 artifact 带上 /tmp/burn.log（烧录验证失败时才有线索）",
       "/tmp/burn.log" in _pkg_txt)
+
+# ⑨ 🔴 ffmpeg 必须带 drawtext —— 否则 .app 的「批量添加字幕」整个功能是坏的。
+#    2026-09-17：runner 上 brew 装的 ffmpeg 编译时没开 --enable-libfreetype，
+#    没有 drawtext 滤镜，却被 use_local 原样打进 .app，而自检只跑 -version、一路绿灯。
+check("打包mac.sh 有 drawtext 能力校验函数（_ff_has_drawtext）",
+      "_ff_has_drawtext" in _sh_txt)
+
+# ⚠️ 切函数体不能用「从 find() 起固定长度」—— 那样窗口会越过函数末尾，
+#    把后面主流程里的同名调用也算进来，于是断言永远通过。
+#    （2026-09-17 钓鱼测试抓到：抽掉 use_local 里的门槛，断言竟然还是绿的。）
+def _sh_func(txt, name):
+    """粗略切出一个 shell 函数体：从 `name() {` 到行首的 `}`。"""
+    i = txt.find(name + "() {")
+    if i < 0:
+        return ""
+    j = txt.find("\n}", i)
+    return txt[i:j + 2] if j > 0 else txt[i:]
+
+_ul = _sh_func(_sh_txt, "use_local")
+_dl = _sh_func(_sh_txt, "dl_one")
+check("能切出 use_local / dl_one 的函数体（切不出来说明改名了，得同步改断言）",
+      len(_ul) > 200 and len(_dl) > 200, "use_local=%d dl_one=%d" % (len(_ul), len(_dl)))
+check("use_local 会拒绝「没有 drawtext」的本机 ffmpeg（不许直接复制进包）",
+      "_ff_has_drawtext" in _ul and "return 1" in _ul, "函数体 %d 字符" % len(_ul))
+check("下载来的 ffmpeg 也要过 drawtext 校验（不合格就换下一个源）",
+      "_ff_has_drawtext" in _dl and "continue" in _dl, "函数体 %d 字符" % len(_dl))
+
+check("打包前有硬门槛：内置 ffmpeg 缺 drawtext 就 die（宁可不出包）",
+      "仍然没有 drawtext 滤镜" in _sh_txt and "已阻止打包" in _sh_txt)
+
+check("已有的 _bundled_ffmpeg/ 缓存也要先验 drawtext（残缺版不许反复复用）",
+      "旧版本残留" in _sh_txt)
+
+check("mac-package.yml 打包后有 drawtext/subtitles 硬校验（缺了就 ::error + exit 1）",
+      "硬校验：内置 ffmpeg 能烧字幕" in _pkg_txt
+      and "::error title=内置 ffmpeg 缺滤镜" in _pkg_txt)
+
+check("装 ffmpeg 那步会明确报告「本机没有 drawtext」（不再静默通过）",
+      "本机 ffmpeg 没有 drawtext" in _pkg_txt)
+
+check("app.py 自检会探测 ffmpeg 滤镜能力 + 真烧一帧（不再只看 -version）",
+      "_ff_capabilities" in _app_txt and "_selftest_burn" in _app_txt)
 print()
 
 print("=" * 62)

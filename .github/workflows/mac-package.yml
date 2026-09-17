@@ -211,32 +211,45 @@ jobs:
             print('fontTools:', fontTools.version); \
             print('freetype :', freetype.version())"
 
-# ── 3. 装 ffmpeg（🔴 必需，漏了这步打包一定失败）─────────────────────
+      # ── 3. 装 ffmpeg（给打包脚本当「本机那份」的候选）────────────────────
       #
-      # 为什么必须有这一步：
-      #   打包mac.sh 的 [3/6] 步要找一份 macOS 版 ffmpeg 打进 .app，顺序是：
-      #     ① 本地已有 → ② use_local（command -v ffmpeg）→ ③ 从 osxexperts.net 下载
-      #   GitHub 的 macOS runner **没有预装 ffmpeg**，所以 ①② 都会落空，
-      #   只能走 ③ 那个第三方小站 —— 那个站不稳定（实测从国内访问 HTTP 000 直接连不上），
-      #   一旦下载失败脚本就 die，整个打包挂掉。
-      #   brew install 之后 use_local 立刻命中，直接把 brew 那份复制进包，
-      #   **完全绕开那个不靠谱的下载源**。顺带 brew 版自带 freetype/libass，
-      #   烧字幕必需。
+      # 打包mac.sh 的 [3/6] 步要找一份 macOS ffmpeg 打进 .app，顺序是：
+      #   ① _bundled_ffmpeg/ 已有 → ② use_local（command -v ffmpeg）→ ③ 网络下载
+      #   （③ 的源：osxexperts.net / evermeet.cx / ffmpeg-static 的 GitHub Release）
+      #
+      # 🔴 2026-09-17 修正了一个**严重误判**：
+      #   这里原来写着「brew 版自带 freetype/libass，烧字幕必需」，据此先 brew install
+      #   好让 use_local 命中。**实际不是** —— 这个 runner 上 brew 装的 ffmpeg
+      #   编译参数里**没有 --enable-libfreetype**，于是没有 drawtext 滤镜，
+      #   被原样打进 .app → 「批量添加字幕」整个功能是坏的，
+      #   而自检只跑 `-version`，一路绿灯，坏包差点发出去。
+      #
+      #   现在打包脚本自己会验 drawtext：本机这份不合格就**拒绝使用**、转去下载。
+      #   所以这一步保留仍有用（合格时省一次下载），但**不再假设 brew 版一定合格**。
       #
       # 用 --quiet 压掉 Homebrew 的刷屏输出；这一步约 1~2 分钟。
-      - name: 装 ffmpeg（打包mac.sh 依赖它，不能省）
+      - name: 装 ffmpeg（给打包脚本当候选；不合格会被脚本自动跳过）
         run: |
           if command -v ffmpeg >/dev/null 2>&1; then
             echo "runner 已有 ffmpeg，跳过安装"
           else
             brew install ffmpeg --quiet || brew install ffmpeg
           fi
-          echo "───── ffmpeg 就位 ─────"
+          echo "───── 本机 ffmpeg 就位 ─────"
           command -v ffmpeg
           command -v ffprobe
-          ffmpeg -version | head -1
-          # 确认关键能力（烧字幕要 freetype / libass）
-          ffmpeg -version 2>&1 | grep -o 'enable-lib\(ass\|freetype\)' | sort -u || true
+          ffmpeg -hide_banner -version | head -1
+          echo "字幕相关编译项：$(ffmpeg -hide_banner -version 2>&1 \
+            | grep -m1 '^configuration:' | tr ' ' '\n' \
+            | grep -E 'libfreetype|libass|libfontconfig|libharfbuzz' | tr '\n' ' ')"
+          # 🔴 这里**只报告、不判失败**：本机这份不合格时，打包脚本会自己转去下载。
+          #    原来写的是 `grep ... || true` —— 「看起来在检查、其实永远通过」，
+          #    这正是这次事故没被早发现的原因之一。
+          if ffmpeg -hide_banner -filters 2>/dev/null | grep -qw drawtext; then
+            echo "✅ 本机 ffmpeg 带 drawtext"
+          else
+            echo "::warning title=本机 ffmpeg 没有 drawtext::打包脚本会拒绝使用它、改为自行下载一份带 drawtext 的。这不是错误，但依赖下载源可达。"
+          fi
 
 # ── 4. 打包（核心步骤，直接调你那个脚本）────────────────────────────
       #
@@ -268,6 +281,35 @@ jobs:
           echo "───── 内置 ffmpeg ─────"
           ls -la "$APP/Contents/Resources/ffmpeg/" 2>/dev/null || \
             find "$APP" -name 'ffmpeg' -o -name 'ffprobe' | head -20
+
+      # ── 4b. 🔴 硬校验：内置 ffmpeg 真的能烧字幕吗 ────────────────────────
+      #
+      # 为什么单独加这一步：`.app 自检` 只跑 `ffmpeg -version`，
+      # **测不出「没有 drawtext 滤镜」这类缺陷** —— 2026-09-17 就是这么漏过去的。
+      # 这一步直接查滤镜表，缺了就红：宁可不出包，也不交付一个烧不了字幕的 .app。
+      - name: 硬校验：内置 ffmpeg 能烧字幕（drawtext / subtitles）
+        run: |
+          APP="$CODE/dist/视频工具.app"
+          FF="$APP/Contents/Resources/ffmpeg/ffmpeg"
+          [ -f "$FF" ] || FF=$(find "$APP" -name ffmpeg -type f | head -1)
+          echo "内置 ffmpeg: $FF"
+          "$FF" -hide_banner -version | head -1
+          echo "字幕相关编译项：$("$FF" -hide_banner -version 2>&1 \
+            | grep -m1 '^configuration:' | tr ' ' '\n' \
+            | grep -E 'libfreetype|libass|libfontconfig|libharfbuzz' | tr '\n' ' ')"
+          rc=0
+          for f in drawtext subtitles; do
+            if "$FF" -hide_banner -filters 2>/dev/null | grep -qw "$f"; then
+              echo "  ✅ 滤镜 $f"
+            else
+              echo "  ❌ 滤镜 $f 缺失"
+              rc=1
+            fi
+          done
+          if [ "$rc" != "0" ]; then
+            echo "::error title=内置 ffmpeg 缺滤镜，.app 烧不了字幕::上面缺的那个滤镜就是原因（drawtext 需要编译时开 --enable-libfreetype，subtitles 需要 --enable-libass）。这个包不要发出去。"
+            exit 1
+          fi
 
 # ── 5. 在真 Mac 上启动 .app 跑自检 ────────────────────────────────
       #

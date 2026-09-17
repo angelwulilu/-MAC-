@@ -109,6 +109,39 @@ else
 fi
 echo
 
+# ------------------------------------------------------------- ffmpeg 能力校验
+#
+# 🔴 为什么必须有这道校验（2026-09-17 真实事故）：
+#    ffmpeg 的 drawtext 滤镜依赖 **libfreetype**。有的 ffmpeg 编译时没开
+#    `--enable-libfreetype`，于是**根本没有 drawtext 滤镜**（subtitles 同理，靠 libass）。
+#    而 use_local 是「本机装了就直接复制一份打进包」——
+#    GitHub runner 上 brew 装的 ffmpeg 恰好就是这种残缺版，
+#    结果 .app 里那个 ffmpeg 烧不了字幕，**但自检只跑 `-version`，一路绿灯**，
+#    于是一个功能残缺的包被打出来、差点发出去。
+#
+#    所以：**任何来源的 ffmpeg 都必须先过这道校验**，不合格就不许用。
+_ff_has_drawtext() {
+    local e="$1"
+    [ -f "$e" ] || return 1
+    [ -x "$e" ] || chmod +x "$e" 2>/dev/null || true
+    "$e" -hide_banner -filters 2>/dev/null | grep -qw drawtext
+}
+_ff_has_subtitles() {
+    local e="$1"
+    [ -f "$e" ] || return 1
+    [ -x "$e" ] || chmod +x "$e" 2>/dev/null || true
+    "$e" -hide_banner -filters 2>/dev/null | grep -qw subtitles
+}
+# 把编译参数里跟字幕有关的项打出来，日志里一眼能核对
+_ff_config_hits() {
+    local e="$1" conf="" k out=""
+    conf="$("$e" -hide_banner -version 2>/dev/null | grep -m1 '^configuration:' || true)"
+    for k in libfreetype libass libfontconfig libharfbuzz; do
+        case "$conf" in *"--enable-$k"*) out="$out $k" ;; esac
+    done
+    if [ -n "$out" ]; then echo "$out"; else echo "（freetype / libass / fontconfig 一个都没有）"; fi
+}
+
 # ------------------------------------------------------------- 3. ffmpeg
 say "[3/6] 准备 macOS 版 ffmpeg ..."
 mkdir -p "$HERE/_bundled_ffmpeg"
@@ -142,13 +175,14 @@ dl_one() {
         fi
     fi
 
-    # 备选源：evermeet.cx（持续维护多年的 macOS 静态构建站，GitHub 上广泛使用）
-    if [ "$a" = "arm" ]; then
-        # evermeet 目前主要是 x86_64 + arm64 universal 构建
-        urls+=("https://evermeet.cx/ffmpeg/getrelease/${kind}/zip")
-    else
-        urls+=("https://evermeet.cx/ffmpeg/getrelease/${kind}/zip")
-    fi
+    # 备选源 1：evermeet.cx（持续维护多年的 macOS 静态构建站，GitHub 上广泛使用）
+    # evermeet 目前主要是 x86_64 + arm64 universal 构建
+    urls+=("https://evermeet.cx/ffmpeg/getrelease/${kind}/zip")
+
+    # 备选源 2：ffmpeg-static 的 GitHub Release（裸二进制）。
+    # 🔴 加这个是因为前两个都是第三方小站、从某些网络访问会直接连不上；
+    #    GitHub 托管的那份最稳。名字对不上也没关系 —— 下载失败会自动换下一个源。
+    urls+=("https://github.com/eugeneware/ffmpeg-static/releases/latest/download/${kind}-darwin-${a}")
 
     local u
     for u in "${urls[@]}"; do
@@ -160,11 +194,22 @@ dl_one() {
             (cd "$tmp" && unzip -q x.zip) 2>/dev/null
             # 有的源包出来就叫 ffmpeg / ffprobe，有的是二进制裸文件
             if [ -f "$tmp/$kind" ]; then
-                cp "$tmp/$kind" "$out"; rm -rf "$tmp"; return 0
+                cp "$tmp/$kind" "$out"; chmod +x "$out" 2>/dev/null || true
+                # 🔴 下载来的也要过 drawtext 校验 —— 源换版本后可能就没这个滤镜了
+                if [ "$kind" = "ffmpeg" ] && ! _ff_has_drawtext "$out"; then
+                    warn "    这个源的 ffmpeg 没有 drawtext 滤镜，换下一个"
+                    rm -f "$out"; rm -rf "$tmp"; continue
+                fi
+                rm -rf "$tmp"; return 0
             fi
-            # 兼容 evermeet 那种直接给裸二进制的
+            # 兼容 evermeet / ffmpeg-static 那种直接给裸二进制的
             if [ -f "$tmp/x.zip" ] && file "$tmp/x.zip" 2>/dev/null | grep -qi 'executable\|Mach-O'; then
-                cp "$tmp/x.zip" "$out"; rm -rf "$tmp"; return 0
+                cp "$tmp/x.zip" "$out"; chmod +x "$out" 2>/dev/null || true
+                if [ "$kind" = "ffmpeg" ] && ! _ff_has_drawtext "$out"; then
+                    warn "    这个源的 ffmpeg 没有 drawtext 滤镜，换下一个"
+                    rm -f "$out"; rm -rf "$tmp"; continue
+                fi
+                rm -rf "$tmp"; return 0
             fi
         fi
         rm -rf "$tmp"
@@ -179,7 +224,16 @@ use_local() {
     found_ff="$(command -v ffmpeg || true)"
     found_fp="$(command -v ffprobe || true)"
     if [ -n "$found_ff" ] && [ -n "$found_fp" ]; then
-        say "  本机已装 ffmpeg，直接复制一份打进包"
+        # 🔴 本机那份可能是「残缺版」（例如 brew 装的没开 --enable-libfreetype）——
+        #    先验 drawtext，不合格就**拒绝使用**，让流程往下走去下载一份完整的。
+        #    2026-09-17：以前就是无条件复制本机那份，把残缺的 ffmpeg 打进了 .app。
+        if ! _ff_has_drawtext "$found_ff"; then
+            warn "  本机装的 ffmpeg **没有 drawtext 滤镜**（编译时没带 libfreetype）"
+            warn "  拒绝用它打包，否则 .app 的「批量添加字幕」会是坏的。改用下载源。"
+            warn "  本机那份：$found_ff"
+            return 1
+        fi
+        say "  本机已装 ffmpeg，且带 drawtext，直接复制一份打进包"
         say "  （版本：$("$found_ff" -version 2>/dev/null | head -1 | cut -c1-45)）"
         cp "$found_ff" "$FF"; cp "$found_fp" "$FP"
         return 0
@@ -190,20 +244,47 @@ use_local() {
 # ---- 主份：当前机器架构（决定 .app 能不能在这台机器上跑）
 if [ "$ARCH" = "arm64" ]; then THIS_ARCH="arm"; else THIS_ARCH="intel"; fi
 
+# ① 已存在的 _bundled_ffmpeg/ —— 但**必须先验 drawtext**。
+#    不验的话，一个残缺的旧版本会在每次重跑时被反复复用（最阴的一种坑）。
 if [ -x "$FF" ] && [ -x "$FP" ]; then
-    ok "已存在 _bundled_ffmpeg/ffmpeg 与 ffprobe，跳过下载"
-elif use_local; then
-    :
-else
-    warn "本机没有 ffmpeg，从网络下载当前架构（$THIS_ARCH）版本（多个源逐个试）"
-    dl_one ffmpeg  "$THIS_ARCH" "$FF" || die "ffmpeg 下载失败（所有源都不通）。最稳的办法是先装一个再重跑：brew install ffmpeg"
-    dl_one ffprobe "$THIS_ARCH" "$FP" || die "ffprobe 下载失败（所有源都不通）。最稳的办法是先装一个再重跑：brew install ffmpeg"
+    if _ff_has_drawtext "$FF"; then
+        ok "已存在 _bundled_ffmpeg/ 且带 drawtext，跳过下载"
+    else
+        warn "已有的 _bundled_ffmpeg/ffmpeg 没有 drawtext（旧版本残留？）→ 删掉重新获取"
+        rm -f "$FF" "$FP"
+    fi
+fi
+
+# ② 本机装的（use_local 内部会再验一次 drawtext）；③ 都没有才去下载
+if [ ! -x "$FF" ] || [ ! -x "$FP" ]; then
+    if use_local; then
+        :
+    else
+        warn "本机那份不能用，从网络下载当前架构（$THIS_ARCH）版本（多个源逐个试，只接受带 drawtext 的）"
+        dl_one ffmpeg  "$THIS_ARCH" "$FF" || die "ffmpeg 下载失败：所有源都不通，或所有源给的 ffmpeg 都缺 drawtext 滤镜。
+    最稳的解决办法：手动准备一个**带 drawtext** 的 macOS 版 ffmpeg，
+    和配套的 ffprobe 一起改名放进：
+        $HERE/_bundled_ffmpeg/
+    然后重跑本脚本。自检命令：
+        ./ffmpeg -hide_banner -filters | grep -w drawtext"
+        dl_one ffprobe "$THIS_ARCH" "$FP" || die "ffprobe 下载失败（所有源都不通）。"
+    fi
 fi
 
 chmod +x "$FF" "$FP"
 xattr -dr com.apple.quarantine "$FF" 2>/dev/null || true
 xattr -dr com.apple.quarantine "$FP" 2>/dev/null || true
+
+# 🔴 最终硬门槛：宁可这次打包失败，也不能产出一个「烧不了字幕」的 .app。
+#    静默交付一个功能残缺的包，比打包失败严重得多。
+if ! _ff_has_drawtext "$FF"; then
+    die "内置 ffmpeg 仍然没有 drawtext 滤镜 —— 这样打出来的 .app「批量添加字幕」会是坏的，已阻止打包。
+    解决办法：找一个带 libfreetype 的 macOS ffmpeg（配同名 ffprobe）
+    放进 $HERE/_bundled_ffmpeg/ 再重跑。"
+fi
 ok "主份 ffmpeg 就绪（本机架构）：$("$FF" -version 2>/dev/null | head -1 | cut -c1-50)"
+say "    字幕相关编译项：$(_ff_config_hits "$FF")"
+say "    drawtext 滤镜：$(_ff_has_drawtext "$FF" && echo 有 || echo 没有 )　subtitles 滤镜：$(_ff_has_subtitles "$FF" && echo 有 || echo 没有 )"
 
 # ---- 另一份架构（--both 时）：只放到 _alt/，给用户留个「换架构」的备胎
 if [ "$WANT_BOTH" = "1" ]; then

@@ -1527,6 +1527,58 @@ def _selftest_skip_gui():
     return False
 
 
+def _ff_capabilities(ff):
+    """探测 ffmpeg 有没有「烧字幕」必需的滤镜。
+
+    🔴 为什么需要它：ffmpeg 的 `drawtext` 依赖编译时的 libfreetype，
+    `subtitles` 依赖 libass。**有的 ffmpeg 编译时没开这两项，于是根本没有这些滤镜**
+    —— 字幕烧录整个功能是坏的，但 `ffmpeg -version` 完全正常，
+    自检如果只跑 -version 就会一路绿灯。2026-09-17 就是这样漏掉一个坏包。
+
+    返回 {"drawtext": bool, "subtitles": bool}
+    """
+    caps = {"drawtext": False, "subtitles": False}
+    try:
+        r = subprocess.run([ff, "-hide_banner", "-filters"], capture_output=True,
+                           timeout=30, **paths.spawn_kwargs())
+        txt = (r.stdout or b"").decode("utf-8", "replace")
+        for line in txt.splitlines():
+            parts = line.split()
+            if len(parts) >= 3 and parts[1] in caps:
+                caps[parts[1]] = True
+    except Exception:
+        pass
+    return caps
+
+
+def _selftest_burn(ff):
+    """真的烧一帧来验证 drawtext 端到端可用。
+
+    用 `-f null -` 当输出，**不需要编码器**，所以很快（约 1 秒），
+    只测「滤镜图能不能建起来」这一件事 —— 那正是 drawtext 缺失会挂的地方。
+
+    返回 (ok, msg)。
+    """
+    font = paths.default_font()[1]
+    if not font:
+        return True, "（这台机器没有中文字体，跳过试烧）"
+    vf = ("drawtext=fontfile='{}':text='广审':fontsize=24:"
+          "x=10:y=10:fontcolor=white".format(
+              font.replace("\\", "/").replace(":", "\\:")))
+    try:
+        r = subprocess.run(
+            [ff, "-hide_banner", "-loglevel", "error",
+             "-f", "lavfi", "-i", "color=c=black:s=320x240:d=0.1",
+             "-vf", vf, "-frames:v", "1", "-f", "null", "-"],
+            capture_output=True, timeout=60, **paths.spawn_kwargs())
+        if r.returncode != 0:
+            tail = (r.stderr or b"").decode("utf-8", "replace").strip().splitlines()
+            return False, (tail[-1][:120] if tail else "ffmpeg 返回 %d" % r.returncode)
+        return True, ""
+    except Exception as e:
+        return False, repr(e)[:120]
+
+
 def _selftest():
     """诊断模式：命令行加 `--selftest` 时，检查关键路径和依赖，写出报告。
 
@@ -1562,6 +1614,20 @@ def _selftest():
                     name, first[0][:70] if first else "(无输出)"))
             except Exception as e:
                 lines.append("  {} 无法运行    : {}".format(name, e))
+    # ── ffmpeg 的「滤镜能力」+ 真烧一帧 ────────────────────────────────
+    # 🔴 只跑 `-version` **测不出**这个缺陷：缺 drawtext 的 ffmpeg 版本号一切正常，
+    #    但烧字幕必失败。必须查滤镜表，并真烧一帧。（2026-09-17 的真实漏网。）
+    if os.path.isfile(ff):
+        _caps = _ff_capabilities(ff)
+        for _nm in ("drawtext", "subtitles"):
+            lines.append("滤镜 {:<13}: {}".format(_nm, "OK" if _caps.get(_nm) else "**缺失**"))
+            if not _caps.get(_nm):
+                bad.append("ffmpeg 缺 %s 滤镜" % _nm)
+        if _caps.get("drawtext"):
+            _bok, _bmsg = _selftest_burn(ff)
+            lines.append("试烧一帧(drawtext): " + ("OK" if _bok else "**失败** " + _bmsg))
+            if not _bok:
+                bad.append("drawtext 试烧失败")
 
     pd = paths.preset_dir()
     lines.append("字幕预设目录      : {} [{}]".format(
