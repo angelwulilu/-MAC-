@@ -156,15 +156,19 @@ jobs:
           python3 - <<'PY'
           import os, shutil, subtitle
           presets = sorted(f for f in os.listdir("subtitle_presets") if f.endswith(".ass"))
-          if presets:
-              ap = os.path.join("subtitle_presets", presets[0])
+          if not presets:
+              print("没有 .ass 预设可测")
+          else:
+              # 优先烧「小蓝片广审字幕」预设，方便肉眼核对这份广审声明的字形/排版效果；
+              # 找不到时退回按字母序第一个预设。
+              target = "小蓝片广审字幕.ass"
+              name = target if target in presets else presets[0]
+              ap = os.path.join("subtitle_presets", name)
               print("用预设验证 libass 路：", ap)
               ok, msg = subtitle.burn_subtitle_ass("/tmp/test_src.mp4", "/tmp/test_burned_ass.mp4", ap)
               print(("✅" if ok else "⚠️"), "libass 路：", msg)
               if ok and os.path.isfile("/tmp/test_burned_ass.mp4"):
                   shutil.copy("/tmp/test_burned_ass.mp4", "/tmp/test_burned.mp4")
-          else:
-              print("没有 .ass 预设可测")
           PY
 
       - name: 上传成品供肉眼检查
