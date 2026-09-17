@@ -65,13 +65,21 @@ jobs:
           fi
           echo "代码目录 = $CODE"
 
-      - name: 准备 ffmpeg（GitHub 的 Mac 自带没有，用 brew 装；Homebrew 版自带 freetype/libass，字幕必需）
+      - name: 准备 ffmpeg（必须带 drawtext 滤镜，否则烧不了字幕）
         run: |
-          if ! command -v ffmpeg >/dev/null 2>&1; then
-            brew install ffmpeg
-          fi
-          ffmpeg -version | head -1
-          ffprobe -version | head -1
+          # 🔴 brew 装的 ffmpeg 默认没开 --enable-libfreetype → 没有 drawtext 滤镜
+          #    （2026-09-17 实测：brew ffmpeg 9.0.1_1 烧字幕报 No such filter: 'drawtext'）。
+          #    因此不能用裸 brew install 就用，必须拿一个「带 drawtext」的静态构建。
+          #    fetch_ffmpeg_mac.sh 会自动下载 osxexperts/evermeet/ffmpeg-static 等源，
+          #    每个都校验 drawtext，没有就换下一个，最终仍没有就明确报错失败。
+          #    下载来的二进制放进 $CODE/ffmpeg/ —— 这是 paths.find_ffmpeg() 的
+          #    **第 1 优先级**位置，能盖过 /opt/homebrew/bin 那份残缺的 brew 版。
+          bash "$CODE/fetch_ffmpeg_mac.sh" "$CODE/ffmpeg"
+          # 顺手加进 PATH 兜底（让命令行直接敲 ffmpeg 也是对的）
+          echo "$CODE/ffmpeg" >> "$GITHUB_PATH"
+          echo "───── 下载结果 ─────"
+          ls -la "$CODE/ffmpeg"
+          ffmpeg -hide_banner -version 2>/dev/null | head -1 || true
 
       - name: 字体解析 + 交付物格式（不依赖 PySide6，先跑这道保底）
         run: |
