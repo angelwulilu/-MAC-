@@ -901,6 +901,46 @@ check("app.py 自检会探测 ffmpeg 滤镜能力 + 真烧一帧（不再只看 
       "_ff_capabilities" in _app_txt and "_selftest_burn" in _app_txt)
 print()
 
+print("[9] 自检本身不许「静默失效」（2026-09-17 实测踩过的三个坑）")
+# 🔴 背景：这三个 bug 让 `--selftest` 要么直接崩、要么**假装正常**，而且都很隐蔽 ——
+#    真正致命的是第二个：一个 `except: pass` 把 NameError 吞了，于是「滤镜缺失」
+#    永远是假警报，连人都被带到错误方向（去查 ffmpeg，其实写错了变量）。
+#    而 CI 里「.app 自检」排在「上传 .app 成品」之前、且没有 continue-on-error
+#    → 自检一崩，.app 就传不上来。所以这几条必须钉住。
+_app_lines = _app_txt.splitlines()
+_paths_path2 = os.path.join(HERE, "paths.py")
+_paths_txt = open(_paths_path2, encoding="utf-8").read() if os.path.isfile(_paths_path2) else ""
+
+
+def _lines_starting(pat):
+    """返回所有「去掉缩进后以 pat 开头」的行号（1 起）。"""
+    return [i for i, l in enumerate(_app_lines, 1) if l.strip().startswith(pat)]
+
+
+# 模块级导入 = 顶格那一行（函数体内那个是缩进的，不算）
+_i_sub = next((i for i, l in enumerate(_app_lines, 1)
+               if l.startswith("import subprocess")), -1)
+check("app.py 在模块级 import subprocess（顶格那行；函数里局部导入不算）",
+      _i_sub > 0, "顶格 import subprocess @行 %s" % _i_sub)
+
+_i_bad_def = _lines_starting("bad = []")
+_i_bad_use = _lines_starting('bad.append("ffmpeg 缺')
+check("app.py 的 bad = [] 定义在首次使用之前（否则滤镜缺失时 UnboundLocalError 崩自检）",
+      bool(_i_bad_def) and bool(_i_bad_use) and min(_i_bad_def) < min(_i_bad_use),
+      "bad=[] @%s，首次使用 @%s" % (_i_bad_def or "未找到", _i_bad_use or "未找到"))
+
+check("_ff_capabilities 探测失败会留痕（不能 except: pass —— 那会把故障读成「滤镜缺失」）",
+      # ⚠️ 必须连等号一起查：_selftest 里那句 str(_caps["_error"]) 会
+      #    意外「包含」caps["_error"] 这个子串，只查子串会漏判（钓鱼测试抓出来的）。
+      'caps["_error"] =' in _app_txt or "caps['_error'] =" in _app_txt)
+
+check("自检里试烧一帧的调用有 try/except 兜底（不许因它崩掉整个自检）",
+      "试烧过程异常" in _app_txt)
+
+check("_selftest_burn 用的字体 API 确实存在（用错模块/函数名 = AttributeError 崩自检）",
+      ("def default_font" in _paths_txt) or ("available_fonts" in _app_txt))
+print()
+
 print("=" * 62)
 if skips:
     print("通过 %d 项，失败 %d 项，跳过 %d 项" % (len(oks), len(fails), len(skips)))

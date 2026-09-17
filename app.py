@@ -19,6 +19,12 @@ import json
 import threading
 import time
 import tempfile
+# 🔴 必须模块级导入：_ff_capabilities / _selftest_burn 用了 subprocess，
+#    而本文件原先只在 _selftest() 内部局部 import —— 于是那两个函数一调用就
+#    NameError，又被 except Exception 吞掉，导致「滤镜缺失」永远是假警报，
+#    而且 CI 的「烧中文字幕」校验会据此误判。
+#    （2026-09-17 在 Windows 副本上实测定位，同源问题两边都有。）
+import subprocess
 import platform
 
 import paths
@@ -1546,8 +1552,10 @@ def _ff_capabilities(ff):
             parts = line.split()
             if len(parts) >= 3 and parts[1] in caps:
                 caps[parts[1]] = True
-    except Exception:
-        pass
+    except Exception as e:
+        # ⚠️ 不静默：探测本身失败（路径不对 / 权限 / 变量没定义）必须留痕，
+        #    否则会被读成「滤镜缺失」，把人引到完全错误的方向。
+        caps["_error"] = "{}: {}".format(type(e).__name__, e)[:150]
     return caps
 
 
@@ -1598,6 +1606,12 @@ def _selftest():
                                        else "不支持（本平台无此项，界面已隐藏）"),
              "-" * 58]
 
+    # 🔴 bad 必须在这里先定义：下面「ffmpeg 滤镜能力」那一段就会往它里面 append，
+    #    原来定义在模块检查之前 → 滤镜缺失时直接 UnboundLocalError，整个自检崩掉，
+    #    而 CI 里「.app 自检」排在「上传 .app 成品」之前且不容错 → 会挡住 .app 上传。
+    #    （2026-09-17 实测）
+    bad = []
+
     ff = paths.find_ffmpeg()
     fp = paths.find_ffprobe()
     lines.append("ffmpeg            : {} [{}]".format(
@@ -1619,12 +1633,20 @@ def _selftest():
     #    但烧字幕必失败。必须查滤镜表，并真烧一帧。（2026-09-17 的真实漏网。）
     if os.path.isfile(ff):
         _caps = _ff_capabilities(ff)
+        if _caps.get("_error"):
+            lines.append("滤镜探测出错      : " + str(_caps["_error"]))
         for _nm in ("drawtext", "subtitles"):
             lines.append("滤镜 {:<13}: {}".format(_nm, "OK" if _caps.get(_nm) else "**缺失**"))
             if not _caps.get(_nm):
                 bad.append("ffmpeg 缺 %s 滤镜" % _nm)
         if _caps.get("drawtext"):
-            _bok, _bmsg = _selftest_burn(ff)
+            # 🔴 这一步出任何意外都不许让整个自检崩掉 ——
+            #    CI 上 .app 自检失败会挡住「上传 .app 成品」（自检在步骤 11，上传在 14）。
+            try:
+                _bok, _bmsg = _selftest_burn(ff)
+            except Exception as _e:
+                _bok, _bmsg = False, "试烧过程异常 {}: {}".format(
+                    type(_e).__name__, _e)
             lines.append("试烧一帧(drawtext): " + ("OK" if _bok else "**失败** " + _bmsg))
             if not _bok:
                 bad.append("drawtext 试烧失败")
@@ -1647,7 +1669,6 @@ def _selftest():
         "PySide6.QtNetwork", "PySide6.QtMultimedia",
         "PySide6.QtMultimediaWidgets", "fontTools.ttLib", "freetype", "ctypes",
     ]
-    bad = []
     for mod in modules:
         try:
             __import__(mod)
