@@ -97,7 +97,11 @@ say "[2/6] 安装 PyInstaller 与 PySide6 ..."
 #    如果这是系统自带的 python3，可能会要你加 --break-system-packages；
 #    脚本里不擅自加，宁可让用户看到清晰报错。
 python3 -m pip install --upgrade pip setuptools wheel >/dev/null 2>&1 || warn "pip 升级失败，继续"
-if python3 -m pip install --upgrade pyinstaller PySide6 ; then
+# 🔴 fontTools / freetype-py 也必须装 —— subtitle_tab.py 用到它们：
+#    fontTools 读 OS/2 度量、freetype-py 量字形 ink。不装的话……
+#    打包出来的 .app 自检会报「模块 fontTools.ttLib / freetype **失败**」，
+#    字体精确定位会静默退化成降级方案（不报错，但排版精度变差）。
+if python3 -m pip install --upgrade pyinstaller PySide6 fontTools freetype-py ; then
     ok "PyInstaller + PySide6 就绪"
 else
     die "依赖安装失败。如果提示 externally-managed-environment，请用虚拟环境：
@@ -360,8 +364,14 @@ if [ "$SELFTEST_RC" = "0" ] && grep -q "全部正常" /tmp/vt_selftest.log; then
     grep -E "ffmpeg|预设|结论|OK" /tmp/vt_selftest.log | head -20 || true
 elif [ "$SELFTEST_RC" = "143" ] || [ "$SELFTEST_RC" = "137" ]; then
     warn "自检被看门狗超时终止（${SELFTEST_TIMEOUT}s）—— .app 已经打好了，别慌"
-else
+elif [ "$SELFTEST_RC" != "0" ]; then
     warn "自检返回非 0（$SELFTEST_RC），输出如下（把这段发给开发看）："
+    tail -40 /tmp/vt_selftest.log 2>/dev/null || true
+else
+    # 退出码是 0，只是结论里列了「有问题 -> xxx」。
+    # 🔴 别写成「返回非 0（0，…」—— 那句会把人带偏（2026-09-17 实测踩过）。
+    warn "自检跑完了，但结论不是「全部正常」（退出码 0）。缺的项见上面「结论」那行："
+    grep -E "^结论|\*\*失败\*\*" /tmp/vt_selftest.log 2>/dev/null || true
     tail -40 /tmp/vt_selftest.log 2>/dev/null || true
 fi
 echo

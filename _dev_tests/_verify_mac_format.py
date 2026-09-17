@@ -831,6 +831,28 @@ check("mac-package.yml 的 timeout-minutes >= 60（实测 45 太紧）",
 # ⑥ 自检输出必须能进 CI 日志（卡住时才知道跑到哪）
 check("打包mac.sh 会把自检输出 cat 出来（不是只写文件）",
       "cat /tmp/vt_selftest.log" in _sh_txt)
+
+# ⑦ 🔴 交付物必须**排在验证之前**。
+#    2026-09-17 run #7：「烧中文字幕」验证挂了，把后面的「打包 zip / 上传 .app」
+#    全带成 skipped —— .app 明明打好了却下不到，白等一轮。
+#    所以顺序钉死：先 zip + 上传，再跑各种验证。
+_i_up = _pkg_txt.find("- name: 上传 .app 成品")
+_i_burn = _pkg_txt.find("- name: 烧中文字幕")
+check("「上传 .app 成品」排在「烧中文字幕」之前（验证挂了也能拿到 .app）",
+      0 <= _i_up < _i_burn,
+      "上传@%d 烧字幕@%d" % (_i_up, _i_burn))
+
+check("「烧中文字幕」设了 continue-on-error（它是验证，不该挡住产物）",
+      "continue-on-error: true" in _pkg_txt[_i_burn:_i_burn + 400])
+
+# ⑧ 字体度量依赖：漏装 → .app 自检报「模块 fontTools.ttLib / freetype 失败」，
+#    而且**不报错**，只是排版精度静默降级，最容易一直发现不了。
+check("打包mac.sh 的 pip 清单含 fontTools 与 freetype-py",
+      "fontTools freetype-py" in _sh_txt)
+check("workflow 装依赖也含 fontTools 与 freetype-py",
+      "fontTools freetype-py" in _pkg_txt)
+check("打包日志 artifact 带上 /tmp/burn.log（烧录验证失败时才有线索）",
+      "/tmp/burn.log" in _pkg_txt)
 print()
 
 print("=" * 62)

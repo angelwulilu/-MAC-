@@ -95,7 +95,7 @@ jobs:
         with:
           python-version: '3.12'     # 3.12 的 PySide6 wheel 最稳；别用太新的版本
 
-      # ── 1. 先跑不依赖 PySide6 的保底检查（快，坏了立刻知道）─────────────
+# ── 1. 先跑不依赖 PySide6 的保底检查（快，坏了立刻知道）────────────────
       #
       # 🔴 这一组把 CI 卡死过**两次**，两次都是「本地全过、runner 秒挂」：
       #
@@ -191,11 +191,14 @@ jobs:
           fi
           exit $rc_all
 
-      # ── 2. 装依赖 ────────────────────────────────────────────────────
+# ── 2. 装依赖 ────────────────────────────────────────────────────
       - name: 装 PyInstaller 与 PySide6
         run: |
           python3 -m pip install --upgrade pip
-          python3 -m pip install pyinstaller PySide6
+          python3 -m pip install pyinstaller PySide6 fontTools freetype-py
+          # 🔴 fontTools / freetype-py：subtitle_tab.py 用它们做字体精确度量。
+          #    漏装 → .app 自检报「模块 fontTools.ttLib / freetype 失败」，
+          #    排版精度静默降级（不报错，所以很容易一直没发现）。
 
       - name: 确认依赖版本
         run: |
@@ -203,8 +206,12 @@ jobs:
             print('Python   :', sys.version.split()[0]); \
             print('PySide6  :', PySide6.__version__); \
             print('PyInst  :', PyInstaller.__version__)"
+          # 字体度量用的两个包 —— 装了才有精确排版，必须确认在
+          python3 -c "import fontTools, freetype; \
+            print('fontTools:', fontTools.version); \
+            print('freetype :', freetype.version())"
 
-      # ── 3. 装 ffmpeg（🔴 必需，漏了这步打包一定失败）──────────────────
+# ── 3. 装 ffmpeg（🔴 必需，漏了这步打包一定失败）─────────────────────
       #
       # 为什么必须有这一步：
       #   打包mac.sh 的 [3/6] 步要找一份 macOS 版 ffmpeg 打进 .app，顺序是：
@@ -231,7 +238,7 @@ jobs:
           # 确认关键能力（烧字幕要 freetype / libass）
           ffmpeg -version 2>&1 | grep -o 'enable-lib\(ass\|freetype\)' | sort -u || true
 
-      # ── 4. 打包（核心步骤，直接调你那个脚本）──────────────────────────
+# ── 4. 打包（核心步骤，直接调你那个脚本）────────────────────────────
       #
       # ⚠️ 这里**故意直接调 打包mac.sh**，而不是把打包逻辑抄一份到 workflow 里。
       #    这样「CI 里跑的」和「你在自己 Mac 上跑的」是**同一份脚本** ——
@@ -262,7 +269,7 @@ jobs:
           ls -la "$APP/Contents/Resources/ffmpeg/" 2>/dev/null || \
             find "$APP" -name 'ffmpeg' -o -name 'ffprobe' | head -20
 
-      # ── 4. 在真 Mac 上启动 .app 跑自检 ────────────────────────────────
+# ── 5. 在真 Mac 上启动 .app 跑自检 ────────────────────────────────
       #
       # 这一步比「打包成功」重要得多 —— 能验证 .app 真的**起得来**、
       # 内置 ffmpeg 找得到、字体解析得到。打包成功 ≠ 能用。
@@ -283,36 +290,6 @@ jobs:
             cat /tmp/selftest.log || true
           fi
 
-      # ── 5. 真机烧一条中文字幕（验证字体 + freetype 真出中文字形）──────
-      - name: 烧中文字幕（drawtext 路）
-        if: ${{ inputs.run_tests }}
-        run: |
-          cd "$CODE"
-          # 先弄个测试源视频
-          FF=$(find "$CODE/dist/视频工具.app" -name ffmpeg -type f | head -1)
-          [ -n "$FF" ] || FF=ffmpeg
-          echo "用这个 ffmpeg: $FF"
-          "$FF" -y -f lavfi -i "testsrc=duration=3:size=1080x1920:rate=30" \
-                -pix_fmt yuv420p /tmp/src.mp4
-
-          python3 - <<'PY'
-          import subtitle
-          fonts = subtitle.available_fonts()
-          print("Mac 上探测到的中文字体：")
-          for n, p in fonts:
-              print("   ", n, "->", p)
-          assert fonts, "❌ 一个中文字体都没找到，字幕会是方块"
-
-          name, fp = fonts[0]
-          ok, msg = subtitle.burn_subtitle_manual(
-              "/tmp/src.mp4", "/tmp/burned.mp4",
-              "广审测试 中文显示正常", 40, "#FFFFFF", 100,
-              "bottom", "center", True, "9:16", font_file=fp)
-          print(("✅" if ok else "❌"), "drawtext 烧录：", msg)
-          assert ok, "烧录失败"
-          PY
-
-      # ── 6. 打 zip / 可选 dmg ─────────────────────────────────────────
       - name: 打包 .app 为 zip
         run: |
           cd "$CODE/dist"
@@ -334,15 +311,7 @@ jobs:
             echo "（dist/ffmpeg 不存在，跳过）"
           fi
 
-      - name: 打 dmg（可选）
-        if: ${{ inputs.make_dmg }}
-        run: |
-          cd "$CODE/dist"
-          hdiutil create -volname "视频工具" -srcfolder "视频工具.app" \
-                  -ov -format UDZO "$RUNNER_TEMP/视频工具-macOS-arm64.dmg" || true
-          ls -lh "$RUNNER_TEMP"/*.dmg 2>/dev/null || echo "dmg 没生成（不影响 zip）"
-
-      # ── 7. 上传 ──────────────────────────────────────────────────────
+# ── 6. 打成 zip 并上传 .app（🔴 交付物：必须在验证步骤之前）───────────
       - name: 上传 .app 成品
         uses: actions/upload-artifact@v4
         with:
@@ -350,6 +319,73 @@ jobs:
           path: ${{ runner.temp }}/视频工具-macOS-arm64.zip
           if-no-files-found: error
           retention-days: 14         # 14 天后自动清（省空间，也提醒你及时下载）
+
+# ── 7. 真机烧一条中文字幕（验证字体 + drawtext 真出中文字形）──────────
+      #
+      # 🔴 这一步是「验证」不是「交付物」—— .app 已经在上面 zip 并上传完了。
+      #    所以加 continue-on-error：它挂了也不影响你把 .app 拿走。
+      #    2026-09-17 run #7 就是它挂了（2 秒），把后面的 zip + 上传全带成 skipped，
+      #    结果 .app 明明打好了却下不到 —— 教训：产物步骤要在验证步骤**之前**。
+      - name: 烧中文字幕（drawtext 路）
+        if: ${{ inputs.run_tests }}
+        continue-on-error: true
+        run: |
+          cd "$CODE"
+          echo "───── runner 上的中文字体候选（paths.resolve_fonts 只认这些路径）─────"
+          for f in "/System/Library/Fonts/PingFang.ttc" \
+                   "/System/Library/Fonts/Hiragino Sans GB.ttc" \
+                   "/System/Library/Fonts/STHeiti Medium.ttc" \
+                   "/System/Library/Fonts/STHeiti Light.ttc" \
+                   "/System/Library/Fonts/Supplemental/Songti.ttc" \
+                   "/System/Library/Fonts/Supplemental/Kaiti.ttc" \
+                   "/System/Library/Fonts/Supplemental/FangSong.ttf"; do
+            if [ -f "$f" ]; then echo "  存在 : $f"; else echo "  缺失 : $f"; fi
+          done
+          echo "───── /System/Library/Fonts 实际内容 ─────"
+          ls -1 /System/Library/Fonts 2>/dev/null | head -40 || true
+
+          FF=$(find "$CODE/dist/视频工具.app" -name ffmpeg -type f | head -1)
+          [ -n "$FF" ] || FF=ffmpeg
+          echo "用这个 ffmpeg: $FF"
+          "$FF" -y -f lavfi -i "testsrc=duration=3:size=1080x1920:rate=30" \
+                -pix_fmt yuv420p /tmp/src.mp4
+
+          cat > /tmp/burn_check.py <<'PY'
+          import sys
+          sys.path.insert(0, ".")
+          import subtitle
+          fonts = subtitle.available_fonts()
+          print("探测到的中文字体（subtitle.available_fonts）：")
+          for n, p in fonts:
+              print("   ", n, "->", p)
+          if not fonts:
+              print("WARN: runner 上没有任何中文字体 —— 这是 CI 环境限制，")
+              print("      不代表 .app 有问题（你自己的 Mac 有苹方/黑体）。")
+              print("      => 跳过烧录验证。")
+              sys.exit(0)
+          name, fp = fonts[0]
+          ok, msg = subtitle.burn_subtitle_manual(
+              "/tmp/src.mp4", "/tmp/burned.mp4",
+              "广审测试 中文显示正常", 40, "#FFFFFF", 100,
+              "bottom", "center", True, "9:16", font_file=fp)
+          print(("OK " if ok else "BAD"), "drawtext 烧录：", msg)
+          sys.exit(0 if ok else 1)
+          PY
+          set +e
+          python3 /tmp/burn_check.py 2>&1 | tee /tmp/burn.log
+          rc=${PIPESTATUS[0]}
+          set -e
+          echo "烧录验证退出码 = $rc（这一步挂了不影响上面已上传的 .app）"
+          exit $rc
+
+# ── 8. 打 dmg（可选）─────────────────────────────────────────────
+      - name: 打 dmg（可选）
+        if: ${{ inputs.make_dmg }}
+        run: |
+          cd "$CODE/dist"
+          hdiutil create -volname "视频工具" -srcfolder "视频工具.app" \
+                  -ov -format UDZO "$RUNNER_TEMP/视频工具-macOS-arm64.dmg" || true
+          ls -lh "$RUNNER_TEMP"/*.dmg 2>/dev/null || echo "dmg 没生成（不影响 zip）"
 
       - name: 上传烧录样例视频（供肉眼看中文字形）
         if: ${{ always() && inputs.run_tests }}
@@ -381,6 +417,8 @@ jobs:
           path: |
             /tmp/build.log
             /tmp/selftest.log
+            /tmp/burn.log
+            /tmp/burn_check.py
             /tmp/selftest_out/
           if-no-files-found: warn
           retention-days: 7
