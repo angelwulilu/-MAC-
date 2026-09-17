@@ -2085,13 +2085,20 @@ class SubtitleTab(QWidget):
     # ---------------- 字幕源 / 样式 ----------------
 
     def _load_presets(self):
-        """从 subtitle_presets 文件夹加载 .ass 预设（并把选择重置为「不使用预设」）"""
+        """从 subtitle_presets 文件夹加载 .ass 预设，默认选中「小蓝片广审字幕.ass"。
+
+        需求：医疗器械类视频每次都要加这份广审声明，所以打开字幕页时直接默认启用。
+        如果文件不存在（被用户删掉），则退回到「不使用预设」。
+        """
         self.preset_combo.blockSignals(True)
         self.preset_combo.clear()
         self.preset_combo.addItem("（不使用预设）")
-        for name in list_presets():
+        default_index = 0
+        for idx, name in enumerate(list_presets(), start=1):
             self.preset_combo.addItem(name)
-        self.preset_combo.setCurrentIndex(0)
+            if name == "小蓝片广审字幕.ass":
+                default_index = idx
+        self.preset_combo.setCurrentIndex(default_index)
         self.preset_combo.blockSignals(False)
         # 信号只连一次：重复 connect 会导致一次选择触发多次刷新
         if not getattr(self, "_preset_signal_connected", False):
