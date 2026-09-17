@@ -359,9 +359,13 @@ jobs:
           for n, p in fonts:
               print("   ", n, "->", p)
           if not fonts:
-              print("WARN: runner 上没有任何中文字体 —— 这是 CI 环境限制，")
-              print("      不代表 .app 有问题（你自己的 Mac 有苹方/黑体）。")
-              print("      => 跳过烧录验证。")
+              # 🔴 跳过必须是**看得见**的：green 的步骤 + 没有产物 = 事后完全看不出
+              #    到底是「真烧了」还是「跳过了」（2026-09-17 run #8 就踩了这个，
+              #    我还误判成「runner 有中文字体」）。用 ::warning:: 出黄色注解。
+              print("::warning title=CI 上没找到中文字体，烧录验证被跳过::"
+                    "resolve_fonts() 在 runner 上一个中文字体都没找到"
+                    "（这是 CI 环境限制，不是 .app 的问题；你自己的 Mac 有苹方/黑体）。"
+                    "本次没有真正烧录，所以也不会有样例视频。")
               sys.exit(0)
           name, fp = fonts[0]
           ok, msg = subtitle.burn_subtitle_manual(

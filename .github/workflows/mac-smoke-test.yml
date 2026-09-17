@@ -85,14 +85,37 @@ jobs:
       - name: 装 PySide6（Mac 上提供对应 arm64 wheel）
         run: pip install --upgrade pip PySide6
 
+      - name: 中文字体候选诊断（先弄清 runner 上到底有没有）
+        run: |
+          # paths.resolve_fonts() 只认这几个 macOS 系统路径，逐个查一遍。
+          # 2026-09-17 之前一直没搞清楚 runner 上有没有 —— 这一步就是为了别再猜。
+          echo "───── resolve_fonts() 认的路径 ─────"
+          for f in "/System/Library/Fonts/PingFang.ttc" \
+                   "/System/Library/Fonts/Hiragino Sans GB.ttc" \
+                   "/System/Library/Fonts/STHeiti Medium.ttc" \
+                   "/System/Library/Fonts/STHeiti Light.ttc" \
+                   "/System/Library/Fonts/Supplemental/Songti.ttc" \
+                   "/System/Library/Fonts/Supplemental/Kaiti.ttc" \
+                   "/System/Library/Fonts/Supplemental/FangSong.ttf"; do
+            if [ -f "$f" ]; then echo "  存在 : $f"; else echo "  缺失 : $f"; fi
+          done
+          echo "───── /System/Library/Fonts 实际内容 ─────"
+          ls -1 /System/Library/Fonts 2>/dev/null | head -40 || true
+
       - name: 程序可 import（offscreen）+ 字幕接口可用
         run: |
           cd "$CODE"
           python3 - <<'PY'
+          import sys
           import paths, subtitle
           fonts = subtitle.available_fonts()
           print("Mac 上探测到的中文字体：", [n for n, _ in fonts])
-          assert fonts, "❌ Mac 上一个中文字体都没找到，字幕会烧成方块！"
+          if not fonts:
+              print("::warning title=runner 上没有中文字体::"
+                    "resolve_fonts() 一个都没找到。这是 CI 环境限制（真实 Mac 上"
+                    "有苹方/黑体），但下面那条烧录断言一定会失败 —— 属于已知情况。")
+          assert fonts, ("❌ runner 上一个中文字体都没找到（见上面「存在/缺失」清单）。"
+                         "这是 CI 环境限制，不代表 .app 有问题 —— 真机自测才算数。")
           print("find_ffmpeg() =", paths.find_ffmpeg())
           try:
               import app
