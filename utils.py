@@ -109,9 +109,15 @@ def is_video(path):
 
 
 def list_videos(folder):
-    """列出文件夹里的所有视频文件"""
+    """列出文件夹里的所有视频文件（按文件名**自然排序**）
+
+    🔴 必须用 _natural_key，不能用 plain sorted()：
+       字符串排序会把 1.mp4 / 10.mp4 / 11.mp4 / … / 2.mp4 排成这个顺序，
+       于是「素材 1」实际读到的是第 6 个文件，拼接顺序全乱。
+       （2026-09-18 与 Windows 版同步修；list_videos 是拼接 tab 与字幕 tab 的共用入口）
+    """
     result = []
-    for name in sorted(os.listdir(folder)):
+    for name in sorted(os.listdir(folder), key=_natural_key):
         full = os.path.join(folder, name)
         if os.path.isfile(full) and is_video(full):
             result.append(full)

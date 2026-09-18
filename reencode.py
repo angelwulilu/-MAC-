@@ -172,22 +172,27 @@ def reencode_material(in_path, params, out_path):
 
 
 def _unique_mat_path(out_dir, base):
-    """素材重编码输出路径：同名自动加 (1)(2)…避免覆盖"""
-    out = os.path.join(out_dir, "{}_重编码.mp4".format(base))
+    """素材重编码输出路径：<原素材名>_重新编码.mp4，同名自动加 (1)(2)…避免覆盖"""
+    out = os.path.join(out_dir, "{}_重新编码.mp4".format(base))
     i = 1
     while os.path.exists(out):
-        out = os.path.join(out_dir, "{}_重编码({}).mp4".format(base, i))
+        out = os.path.join(out_dir, "{}_重新编码({}).mp4".format(base, i))
         i += 1
     return out
 
 
 class ReencodeMatWorker(QObject):
-    """后台线程重编码全部素材，通过信号回报进度"""
+    """后台线程重编码全部素材，通过信号回报进度
+
+    out_dir：
+        给了目录 → 所有成品都放这个目录；
+        给 None  → 每个成品放到**它自己那份素材**所在目录（默认，见 app.py 的对话框）。
+    """
     progress = Signal(int, int, str, bool, str)
     # success_count, fail_list, out_paths
     finished = Signal(int, list, list)
 
-    def __init__(self, materials, params, out_dir):
+    def __init__(self, materials, params, out_dir=None):
         super().__init__()
         self.materials = materials
         self.params = params
@@ -208,7 +213,13 @@ class ReencodeMatWorker(QObject):
                 if self._cancelled:
                     raise InterruptedError("用户取消")
                 base = os.path.splitext(os.path.basename(path))[0]
-                out = _unique_mat_path(self.out_dir, base)
+                # out_dir 为 None = 就地输出到原素材所在目录
+                out_dir = self.out_dir or os.path.dirname(os.path.abspath(path))
+                try:
+                    os.makedirs(out_dir, exist_ok=True)
+                except OSError:
+                    pass      # 建不出来就让下面的 reencode 去报错，错误信息更具体
+                out = _unique_mat_path(out_dir, base)
                 try:
                     reencode_material(path, self.params, out)
                     success += 1

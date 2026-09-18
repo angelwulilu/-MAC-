@@ -217,6 +217,31 @@ class ReencodeMaterialsDialog(QDialog):
         form.addRow("视频码率：", self.vb_edit)
         form.addRow("音频比特率：", self.ab_edit)
 
+        # 保存位置：留空 = 与原素材放同一目录（默认）
+        self.out_dir_edit = QLineEdit()
+        self.out_dir_edit.setPlaceholderText("默认：与原素材相同目录")
+        self.out_dir_edit.setToolTip(
+            "留空（默认）= 每个成品都放在**它自己那份素材**所在的文件夹里；\n"
+            "指定一个文件夹 = 全部成品都放到那个文件夹。"
+        )
+        self.out_dir_btn = QPushButton("浏览…")
+        self.out_dir_btn.clicked.connect(self.choose_out_dir)
+        self.out_dir_reset_btn = QPushButton("恢复默认")
+        self.out_dir_reset_btn.setToolTip("清空保存位置，回到「与原素材相同目录」")
+        self.out_dir_reset_btn.clicked.connect(self.out_dir_edit.clear)
+        dir_row = QHBoxLayout()
+        dir_row.setContentsMargins(0, 0, 0, 0)
+        dir_row.addWidget(self.out_dir_edit, 1)
+        dir_row.addWidget(self.out_dir_btn)
+        dir_row.addWidget(self.out_dir_reset_btn)
+        form.addRow("保存位置：", dir_row)
+
+        name_hint = QLabel(
+            "输出文件名：原素材名_重新编码.mp4（同名不覆盖，自动加 (1)(2)…）"
+        )
+        name_hint.setWordWrap(True)
+        name_hint.setStyleSheet("color: #666;")
+
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
@@ -224,6 +249,7 @@ class ReencodeMaterialsDialog(QDialog):
         layout = QVBoxLayout(self)
         layout.addWidget(hint)
         layout.addLayout(form)
+        layout.addWidget(name_hint)
         layout.addWidget(buttons)
 
     def values(self):
@@ -240,6 +266,36 @@ class ReencodeMaterialsDialog(QDialog):
             "音频比特率": self.ab_edit.text().strip(),
         }
 
+    def choose_out_dir(self):
+        """选一个统一的保存位置（留空 = 与原素材相同目录）"""
+        start = self.out_dir_edit.text().strip()
+        folder = QFileDialog.getExistingDirectory(self, "选择保存位置", start)
+        if folder:
+            self.out_dir_edit.setText(folder)
+
+    def out_dir(self):
+        """返回用户指定的保存位置；空字符串 = 每个成品输出到它自己那份素材所在目录。"""
+        return self.out_dir_edit.text().strip()
+
+
+def head_output_path(head_path):
+    """片头重编码的输出路径：放在**片头文件所在目录**，文件名 head_converted.mp4。
+
+    ⚠️ 为什么不放在程序目录的 output/ 下：打包成 .app 之后 __file__ 指向的是
+       .app **内部**（Contents/…）—— 用户翻不到，重新解压/换新版时还会被整个覆盖掉。
+
+    重复点「4a」时片头已经换成上次的输出文件，算出来的路径会跟输入撞车
+    （ffmpeg 报「输出和输入是同一个文件」）→ 这里自动退让成 head_converted(1).mp4。
+    """
+    head_dir = os.path.dirname(os.path.abspath(head_path))
+    out = os.path.join(head_dir, "head_converted.mp4")
+    i = 1
+    while os.path.normcase(os.path.abspath(out)) == os.path.normcase(
+            os.path.abspath(head_path)):
+        out = os.path.join(head_dir, "head_converted({}).mp4".format(i))
+        i += 1
+    return out
+
 
 class ConcatTab(QWidget):
     """「批量视频拼接」tab：选片头、选素材、参数对比、重编码、批量拼接"""
@@ -249,6 +305,8 @@ class ConcatTab(QWidget):
 
         self.head_path = None   # 片头文件路径
         self.materials = []     # 素材文件路径列表（单个/多个/文件夹都汇总到这里）
+        # 4b 素材重编码的保存位置：None = 每个成品输出到它自己那份素材所在目录（默认）
+        self._mat_out_dir = None
         self.output_dir = default_output_dir()  # 成品默认保存到桌面「合成视频」文件夹
         # 计时器：算「扣掉暂停时间」的实际耗时（用户关心的是这批要跑多久）
         self._pause_tracker = PauseTracker()
@@ -359,7 +417,8 @@ class ConcatTab(QWidget):
         sl4.addLayout(re4a_row)
         sl4.addWidget(QLabel("红色参数出现时点 4a，把片头转成跟素材一致；\n静音片头仅替换片头音轨，不影响画面。"))
         sl4.addWidget(self.reencode_mat_btn)
-        sl4.addWidget(QLabel("素材各自编码不一致时点 4b，把全部素材统一成同一套参数。"))
+        sl4.addWidget(QLabel("素材各自编码不一致时点 4b，把全部素材统一成同一套参数。\n"
+                             "成品默认放在原素材同一目录，文件名加「_重新编码」。"))
         step4.setLayout(sl4)
 
         # ====== 第 5 步：批量合成 + 保存位置 ======
@@ -515,7 +574,9 @@ class ConcatTab(QWidget):
         """选择一个或多个素材文件（可以按住 Ctrl 多选）"""
         paths, _ = QFileDialog.getOpenFileNames(self, "选择素材文件（可按住 Ctrl 多选）", "", VIDEO_FILTER)
         if paths:
-            self.materials = list(paths)
+            # 与「选文件夹」保持一致：按文件名自然排序。
+            # 对话框给的是字符串序（1,10,11,2…），直接 list(paths) 会让拼接顺序错乱。
+            self.materials = sorted(paths, key=_natural_key)
             self.material_label.setText("已手动选择 {} 个素材文件".format(len(paths)))
             self._update_material_stats()
 
@@ -1148,10 +1209,12 @@ class ConcatTab(QWidget):
             QMessageBox.information(self, "结果", "片头和素材的关键参数一致，无需重编码，可以直接拼接。")
             return
 
-        # 输出到项目里的 output 文件夹
-        out_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "output")
+        # 输出到**片头文件所在目录**（2026-09-18 与 Windows 版同步改）。
+        # ⚠️ 之前用 __file__ 拼「程序目录/output」：打进 .app 之后会落到
+        #    Contents/ 内部 —— 用户找不到，换新版 .app 时产物还会被一起覆盖掉。
+        out_path = head_output_path(self.head_path)
+        out_dir = os.path.dirname(out_path)
         os.makedirs(out_dir, exist_ok=True)
-        out_path = os.path.join(out_dir, "head_converted.mp4")
 
         tail = "（含静音片头：音频将换成近静音占位音轨，码率 97k）" if mute else ""
         reply = QMessageBox.question(
@@ -1215,9 +1278,19 @@ class ConcatTab(QWidget):
             QMessageBox.warning(self, "提示", "分辨率和帧率不能为空")
             return
 
-        out_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                               "output", "素材重编码")
-        os.makedirs(out_dir, exist_ok=True)
+        # 保存位置：对话框里指定了就用它；留空 = 每个成品放到它自己那份素材的目录。
+        # ⚠️ 不要再用 __file__ 拼「程序目录/output」：打进 .app 后 = Contents/ 内部，
+        #    用户找不到，而且换新版 .app 时产物会被一起覆盖掉。
+        out_dir = dlg.out_dir()
+        if out_dir:
+            try:
+                os.makedirs(out_dir, exist_ok=True)
+            except OSError as e:
+                QMessageBox.warning(self, "提示", "这个保存位置不可用：\n{}".format(e))
+                return
+        else:
+            out_dir = None
+        self._mat_out_dir = out_dir
 
         total = len(self.materials)
         # 用窗口内嵌进度条，避免弹出式对话框重绘冲突闪退
@@ -1286,15 +1359,24 @@ class ConcatTab(QWidget):
         else:
             QMessageBox.information(
                 self, "素材重编码完成",
-                "全部 {} 个素材已统一编码，总耗时 {}！\n输出文件夹：{}".format(
-                    success_count, elapsed_str,
-                    os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                                 "output", "素材重编码")),
+                "全部 {} 个素材已统一编码，总耗时 {}！\n{}".format(
+                    success_count, elapsed_str, self._mat_output_desc(out_paths)),
             )
         self.status.setText(
             "素材重编码结束：{} 成功，{} 失败（耗时 {}）".format(
                 success_count, len(fail_list), elapsed_str)
         )
+
+    def _mat_output_desc(self, out_paths):
+        """完成弹窗里的「输出位置」一句 —— 区分「指定目录」和「与原素材同目录」两种模式。"""
+        if self._mat_out_dir:
+            return "输出文件夹：{}".format(self._mat_out_dir)
+        dirs = sorted({os.path.dirname(os.path.abspath(p)) for p in out_paths})
+        if not dirs:
+            return "输出位置：与原素材相同目录"
+        if len(dirs) == 1:
+            return "输出位置：{}（与原素材相同目录）".format(dirs[0])
+        return "输出位置：与原素材相同目录（分散在 {} 个文件夹）".format(len(dirs))
 
     def _scroll_left_to_bottom(self):
         """把左侧操作栏滚到底部，让「进度条 / 暂停 / 终止」可见。

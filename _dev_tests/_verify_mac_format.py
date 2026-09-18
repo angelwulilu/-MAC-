@@ -941,6 +941,46 @@ check("_selftest_burn 用的字体 API 确实存在（用错模块/函数名 = A
       ("def default_font" in _paths_txt) or ("available_fonts" in _app_txt))
 print()
 
+print("[10] 保存位置 + 素材读取顺序（2026-09-18 从 Windows 版同步的功能）")
+# 🔴 这两处都是用户实测出来的问题：
+#    ① 4b 的成品原来写进「程序目录/output」—— 打进 .app 后落在 Contents/ 内部，
+#       用户找不到，换新版 .app 时还会被一起覆盖；
+#    ② list_videos 用 plain sorted() = 字符串排序 → 1,10,11,12,2…，
+#       「素材 1」实际读到第 6 个文件，拼接顺序全乱。
+_ren_path = os.path.join(HERE, "reencode.py")
+_utils_path = os.path.join(HERE, "utils.py")
+_ren_txt = open(_ren_path, encoding="utf-8").read() if os.path.isfile(_ren_path) else ""
+_utils_txt = open(_utils_path, encoding="utf-8").read() if os.path.isfile(_utils_path) else ""
+
+check("app.py 4b 对话框有「保存位置」行", 'form.addRow("保存位置：", dir_row)' in _app_txt)
+check("app.py 有 out_dir()（留空 = 与原素材同目录）", "def out_dir(self):" in _app_txt)
+check("app.py 有 head_output_path()（4a 输出到片头所在目录）",
+      "def head_output_path(head_path):" in _app_txt
+      and "out_path = head_output_path(self.head_path)" in _app_txt)
+check("app.py 有 _mat_out_dir / _mat_output_desc（完成弹窗说清落点）",
+      "self._mat_out_dir = None" in _app_txt and "def _mat_output_desc(self, out_paths):" in _app_txt)
+check("app.py 4b 走 dlg.out_dir() 而不是 __file__ 拼目录",
+      "out_dir = dlg.out_dir()" in _app_txt)
+check("app.py 里不再用 __file__ 拼「程序目录/output」",
+      '"output", "素材重编码"' not in _app_txt
+      and 'os.path.dirname(os.path.abspath(__file__)), "output"' not in _app_txt)
+check("reencode.py 输出名 = <原素材名>_重新编码.mp4", "_重新编码.mp4" in _ren_txt)
+check("reencode.py 无旧命名 _重编码", "_重编码" not in _ren_txt)
+check("reencode.py worker 支持 out_dir=None（逐个落到各自素材目录）",
+      "def __init__(self, materials, params, out_dir=None):" in _ren_txt)
+
+check("utils.list_videos 用 _natural_key 自然排序",
+      "sorted(os.listdir(folder), key=_natural_key)" in _utils_txt)
+check("utils 里不再有字符串排序的 listdir",
+      "for name in sorted(os.listdir(folder)):" not in _utils_txt)
+check("app.py 多选素材也按 _natural_key 排序",
+      "self.materials = sorted(paths, key=_natural_key)" in _app_txt)
+
+# 保留 mac 专属差异：mac/paths.py **有** default_font()，别被 Windows 的写法覆盖
+check("保留 mac 专属：_selftest_burn 仍用 paths.default_font（Windows 才用 subtitle.available_fonts）",
+      "paths.default_font" in _app_txt)
+print()
+
 print("=" * 62)
 if skips:
     print("通过 %d 项，失败 %d 项，跳过 %d 项" % (len(oks), len(fails), len(skips)))
